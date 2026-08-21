@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import random
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from torch.utils.data import ConcatDataset
 from data.clip_batching import make_clip_dataloader
 from data.clip_dataset import ClipMMapDataset, collate_clip_records
 from evaluation.codec_evaluation import evaluate_controls, model_control, write_report
+from trainer.codec_losses import compute_codec_losses
 from trainer.codec_trainer import CodecTrainConfig, PVBCodecModel, _to_device
 
 
@@ -33,6 +34,32 @@ def _predictor(model: PVBCodecModel, device: torch.device):
             output = model(moved)
         return output.x_hat.detach().cpu()
     return predict
+
+
+def _loss_evaluator(
+    device: torch.device,
+    config: CodecTrainConfig,
+    normalization: Mapping[str, Any],
+    step: int,
+):
+    def evaluate(prediction: torch.Tensor, batch: Any) -> dict[str, float]:
+        bucket_ids = tuple(str(item) for item in batch.time_bucket_id)
+        if not bucket_ids or len(set(bucket_ids)) != 1:
+            raise ValueError("validation loss requires homogeneous time buckets")
+        moved = _to_device(batch, device)
+        coordinates = prediction.to(device)
+        losses = compute_codec_losses(
+            coordinates,
+            moved,
+            weights=config.weights_at(step),
+            normalization=normalization,
+        )
+        losses["total"] = losses["total"] * config.bucket(bucket_ids[0]).weight
+        return {
+            key: float(value.detach().cpu())
+            for key, value in losses.items()
+        }
+    return evaluate
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -103,12 +130,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             temporal_ratio=ratio,
         ).to(device).eval()
         checkpoint = checkpoint_paths[name]
+        loss_evaluator = None
         if checkpoint is not None:
             payload = torch.load(checkpoint, map_location=device, weights_only=False)
             if not isinstance(payload, dict) or payload.get("schema_version") != "pvb.codec.checkpoint.v1":
                 raise ValueError(f"{name} checkpoint is not a pvb.codec.checkpoint.v1 file")
             model.load_state_dict(payload["model_state"])
-        controls.append(model_control(name, _predictor(model, device), ratio=ratio, temporal=temporal))
+            checkpoint_config = CodecTrainConfig.from_mapping(payload["config"])
+            loss_evaluator = _loss_evaluator(
+                device,
+                checkpoint_config,
+                payload.get("normalization_stats", {}),
+                int(payload.get("step", checkpoint_config.max_steps)),
+            )
+        controls.append(
+            model_control(
+                name,
+                _predictor(model, device),
+                ratio=ratio,
+                temporal=temporal,
+                loss_evaluator=loss_evaluator,
+            )
+        )
     report = evaluate_controls(controls, loader, max_batches=args.max_batches, device=device)
     write_report(report, args.json, args.markdown)
     print(f"wrote {args.json} and {args.markdown}")

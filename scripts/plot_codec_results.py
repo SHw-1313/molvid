@@ -185,6 +185,9 @@ def _evaluation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             metrics = entry.get("metrics")
             if not isinstance(metrics, Mapping):
                 continue
+            loss = entry.get("loss", {})
+            if not isinstance(loss, Mapping):
+                loss = {}
             row: dict[str, Any] = {
                 "control": control,
                 "bucket": bucket,
@@ -205,6 +208,17 @@ def _evaluation_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "frequency_retention",
             ):
                 row[metric_name] = _metric_value(metrics, metric_name)
+            for loss_name in (
+                "total",
+                "coordinate",
+                "local",
+                "bond",
+                "velocity",
+                "acceleration",
+                "velocity_raw",
+                "acceleration_raw",
+            ):
+                row[f"validation_{loss_name}_loss"] = float(loss.get(loss_name, np.nan))
             rows.append(row)
     return rows
 
@@ -317,6 +331,20 @@ def main() -> int:
         plot_loss_curves(logs, args.output_dir, smooth_window=args.smooth_window)
     rows = _evaluation_rows(payload)
     _write_csv(rows, args.output_dir)
+    _plot_metric_grid(
+        rows,
+        args.output_dir,
+        stem="eval_loss",
+        title="Validation loss by native time bucket",
+        specs=(
+            ("validation_total_loss", "Validation total loss", False),
+            ("validation_coordinate_loss", "Coordinate loss", False),
+            ("validation_local_loss", "Local loss", False),
+            ("validation_bond_loss", "Bond loss", False),
+            ("validation_velocity_loss", "Normalized velocity loss", False),
+            ("validation_acceleration_loss", "Normalized acceleration loss", False),
+        ),
+    )
     _plot_metric_grid(
         rows,
         args.output_dir,

@@ -298,6 +298,7 @@ class EvaluationControl:
     predictor: Callable[[Any], Any]
     ratio: int
     temporal: bool
+    loss_evaluator: Optional[Callable[[Tensor, Any], Mapping[str, float]]] = None
 
 
 def anchor_control(name: str = "ratio1_no_temporal") -> EvaluationControl:
@@ -307,8 +308,21 @@ def anchor_control(name: str = "ratio1_no_temporal") -> EvaluationControl:
     return EvaluationControl(name=name, predictor=predict, ratio=1, temporal=False)
 
 
-def model_control(name: str, model: Callable[[Any], Any], *, ratio: int, temporal: bool) -> EvaluationControl:
-    return EvaluationControl(name=name, predictor=model, ratio=int(ratio), temporal=bool(temporal))
+def model_control(
+    name: str,
+    model: Callable[[Any], Any],
+    *,
+    ratio: int,
+    temporal: bool,
+    loss_evaluator: Optional[Callable[[Tensor, Any], Mapping[str, float]]] = None,
+) -> EvaluationControl:
+    return EvaluationControl(
+        name=name,
+        predictor=model,
+        ratio=int(ratio),
+        temporal=bool(temporal),
+        loss_evaluator=loss_evaluator,
+    )
 
 
 def _mean_records(records: list[dict[str, dict[str, float]]]) -> dict[str, Any]:
@@ -324,6 +338,16 @@ def _mean_records(records: list[dict[str, dict[str, float]]]) -> dict[str, Any]:
     for key in ("velocity_rmse", "acceleration_rmse", "frequency_retention"):
         result[key] = sum(record[key] for record in records) / len(records)
     return result
+
+
+def _mean_loss_records(records: list[Mapping[str, float]]) -> dict[str, float]:
+    if not records:
+        return {}
+    keys = tuple(records[0])
+    return {
+        key: sum(float(record[key]) for record in records) / len(records)
+        for key in keys
+    }
 
 
 def _limited_batches(batches: Iterable[Any], max_batches: Optional[int]) -> Iterable[Any]:
@@ -372,9 +396,21 @@ def evaluate_controls(
             atom_count = int(target.shape[1])
             bucket_state = per_bucket.setdefault(
                 bucket,
-                {"records": [], "sample_count": 0, "clip_spans": [], "native_deltas": [], "latent_intervals": [], "latent_tokens": []},
+                {
+                    "records": [],
+                    "loss_records": [],
+                    "sample_count": 0,
+                    "clip_spans": [],
+                    "native_deltas": [],
+                    "latent_intervals": [],
+                    "latent_tokens": [],
+                },
             )
             bucket_state["records"].append(batch_metrics)
+            if control.loss_evaluator is not None:
+                bucket_state["loss_records"].append(
+                    dict(control.loss_evaluator(prediction, batch))
+                )
             batch_size = int(getattr(batch, "batch_size", len(bucket_ids)))
             bucket_state["sample_count"] += batch_size
             bucket_state["clip_spans"].extend(float(value) for value in spans.tolist())
@@ -394,6 +430,8 @@ def evaluate_controls(
                 "latent_tokens": (sum(state["latent_tokens"]) / len(state["latent_tokens"]) if state["latent_tokens"] else 0.0),
                 "metrics": _mean_records(state["records"]),
             }
+            if state["loss_records"]:
+                by_bucket[bucket]["loss"] = _mean_loss_records(state["loss_records"])
         output["controls"][control.name] = {
             "ratio": control.ratio,
             "temporal": control.temporal,
@@ -411,11 +449,23 @@ def evaluate_controls(
 def report_markdown(report: Mapping[str, Any]) -> str:
     lines = ["# PVB codec round-trip evaluation", "", "Metrics are stratified by native time bucket; no cross-bucket mean is reported.", ""]
     for name, control in report.get("controls", {}).items():
-        lines.extend([f"## {name}", "", "| Bucket | Δt (ps) | Span (ps) | Latent interval (ps) | Frame-0 RMSD | Future RMSD | Future dRMSD | Velocity RMSE | Acceleration RMSE |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|"])
+        lines.extend([f"## {name}", "", "| Bucket | Δt (ps) | Span (ps) | Latent interval (ps) | Validation total loss | Frame-0 RMSD | Future RMSD | Future dRMSD | Velocity RMSE | Acceleration RMSE |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
         for bucket, values in control.get("by_time_bucket", {}).items():
             metrics = values["metrics"]
+            loss = values.get("loss", {})
+            total_loss = loss.get("total")
+            loss_text = f"{total_loss:.6g}" if total_loss is not None else "—"
+            native_delta = values["native_delta_time_ps"]
+            latent_interval = values["latent_interval_ps"]
             lines.append(
-                f"| {bucket} | {values['native_delta_time_ps'] if values['native_delta_time_ps'] is not None else '—'} | {values['physical_clip_span_ps']:.4g} | {values['latent_interval_ps'] if values['latent_interval_ps'] is not None else '—'} | {metrics['frame0'].get('rmsd', 0.0):.6g} | {metrics['future'].get('rmsd', 0.0):.6g} | {metrics['future'].get('drmsd', 0.0):.6g} | {metrics.get('velocity_rmse', 0.0):.6g} | {metrics.get('acceleration_rmse', 0.0):.6g} |"
+                f"| {bucket} | {native_delta if native_delta is not None else '—'} | "
+                f"{values['physical_clip_span_ps']:.4g} | "
+                f"{latent_interval if latent_interval is not None else '—'} | "
+                f"{loss_text} | {metrics['frame0'].get('rmsd', 0.0):.6g} | "
+                f"{metrics['future'].get('rmsd', 0.0):.6g} | "
+                f"{metrics['future'].get('drmsd', 0.0):.6g} | "
+                f"{metrics.get('velocity_rmse', 0.0):.6g} | "
+                f"{metrics.get('acceleration_rmse', 0.0):.6g} |"
             )
         lines.append("")
     return "\n".join(lines)
