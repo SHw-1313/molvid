@@ -103,6 +103,20 @@ model:
   backbone: torchmdnet                  # backbone module type, default: torchmdnet, DO NOT CHANGE
 ```
 
+### Temporal codec pilot
+
+The isolated multi-frame codec trainer consumes the versioned half-data clip stores and keeps the legacy `train.sh` path separate. After setting `PROCESSED_DATASET_ROOT`, use the fixed-seed three-control commands in `agents/PILOT_COMMANDS.md`; the GPU path is `train_codec.py` followed by `eval_codec.py`.
+
+### Codec diagnostics
+
+The isolated codec trainer writes per-step JSONL metrics to train_metrics.jsonl. After training and evaluation, generate loss curves and native-time PVB metric comparisons with:
+
+```bash
+python scripts/plot_codec_results.py --eval-json outputs/g5/codec_eval.json --output-dir outputs/g5/plots
+```
+
+The plots include frame-0/future RMSD and dRMSD, bond/contact/clash metrics, velocity and acceleration RMSE, FFT frequency retention, and separate dt_80ps/dt_100ps bars.
+
 ### Inference
 
 We mainly provide two inference scripts, `infer_prot.py` and `infer_complex.py`, for protein-ligand complexes (*e.g.*, PDBBind, MISATO) and protein monomers (*e.g.*, ATLAS, mdCATH), reppectively.

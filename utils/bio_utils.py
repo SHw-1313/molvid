@@ -114,12 +114,12 @@ def get_block_from_complex(top):
             continue
         bond_index.append([begin, end])
         bond_index.append([end, begin])
-    bond_index = np.array(bond_index, dtype=np.compat.long).T   # (2, E)
-    atype = np.array(atype, dtype=np.compat.long)
-    btype = np.array(btype, dtype=np.compat.long)
-    a_pos_index = np.array(a_pos_index, dtype=np.compat.long)
-    b_pos_index = np.array(b_pos_index, dtype=np.compat.long)
-    edge_mask = np.array(edge_mask, dtype=np.compat.long)
+    bond_index = np.array(bond_index, dtype=np.int64).T   # (2, E)
+    atype = np.array(atype, dtype=np.int64)
+    btype = np.array(btype, dtype=np.int64)
+    a_pos_index = np.array(a_pos_index, dtype=np.int64)
+    b_pos_index = np.array(b_pos_index, dtype=np.int64)
+    edge_mask = np.array(edge_mask, dtype=np.int64)
     return atype, btype, a_pos_index, b_pos_index, bond_index, edge_mask
 
 
@@ -162,11 +162,11 @@ def get_block_from_top(top):
             continue
         bond_index.append([begin, end])
         bond_index.append([end, begin])
-    bond_index = np.array(bond_index, dtype=np.compat.long).T   # (2, E)
-    atype = np.array(atype, dtype=np.compat.long)
-    btype = np.array(btype, dtype=np.compat.long)
-    a_pos_index = np.array(a_pos_index, dtype=np.compat.long)
-    b_pos_index = np.array(b_pos_index, dtype=np.compat.long)
+    bond_index = np.array(bond_index, dtype=np.int64).T   # (2, E)
+    atype = np.array(atype, dtype=np.int64)
+    btype = np.array(btype, dtype=np.int64)
+    a_pos_index = np.array(a_pos_index, dtype=np.int64)
+    b_pos_index = np.array(b_pos_index, dtype=np.int64)
     return atype, btype, a_pos_index, b_pos_index, bond_index
 
 
@@ -204,11 +204,11 @@ def get_block_from_mol(mol):
             continue
         bond_index.append([begin, end])
         bond_index.append([end, begin])
-    bond_index = np.array(bond_index, dtype=np.compat.long).T   # (2, E)
-    atype = np.array(atype, dtype=np.compat.long)
-    btype = np.array(btype, dtype=np.compat.long)
-    a_pos_index = np.array(a_pos_index, dtype=np.compat.long)
-    b_pos_index = np.array(b_pos_index, dtype=np.compat.long)
+    bond_index = np.array(bond_index, dtype=np.int64).T   # (2, E)
+    atype = np.array(atype, dtype=np.int64)
+    btype = np.array(btype, dtype=np.int64)
+    a_pos_index = np.array(a_pos_index, dtype=np.int64)
+    b_pos_index = np.array(b_pos_index, dtype=np.int64)
     return atype, btype, a_pos_index, b_pos_index, bond_index
 
 
@@ -243,7 +243,7 @@ def get_res_mask(top):
     :return: residue mask: (N,)
     """
     rmask = [atom.residue.index for atom in top.atoms]
-    rmask = np.array(rmask, dtype=np.compat.long)
+    rmask = np.array(rmask, dtype=np.int64)
     return rmask
 
 
@@ -257,7 +257,7 @@ def get_backbone_index(top):
         backbone = [residue.atom(atom_name) for atom_name in ['N', 'CA', 'C', 'O'] if
                     residue.atom(atom_name) is not None]
         bb_index.append([atom.index for atom in backbone])
-    bb_index = np.array(bb_index, dtype=np.compat.long)
+    bb_index = np.array(bb_index, dtype=np.int64)
     return bb_index
 
 

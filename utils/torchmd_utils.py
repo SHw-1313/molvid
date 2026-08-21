@@ -10,9 +10,74 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 import warnings
+try:
+    from torch_cluster import radius_graph as _radius_graph
+except (ImportError, OSError):
+    _radius_graph = None
 # import sys
 # sys.path.append("..")
-# from extensions import get_neighbor_pairs_kernel
+
+def get_neighbor_pairs_kernel(
+    *,
+    strategy,
+    positions,
+    batch,
+    max_num_pairs,
+    cutoff_lower,
+    cutoff_upper,
+    loop,
+    include_transpose,
+    box_vectors,
+    use_periodic,
+):
+    """Build a TorchMD-compatible neighbor list using PyG's spatial index."""
+
+    del strategy, include_transpose
+    if use_periodic or (box_vectors is not None and box_vectors.numel()):
+        raise NotImplementedError(
+            "the torch_cluster neighbor backend does not implement periodic boxes"
+        )
+    if _radius_graph is None:
+        raise ImportError(
+            "torch_cluster.radius_graph is required for optimized neighbor search"
+        )
+    if positions.ndim != 2 or positions.shape[-1] != 3:
+        raise ValueError("positions must have shape [N, 3]")
+    if batch.ndim != 1 or batch.shape[0] != positions.shape[0]:
+        raise ValueError("batch must have shape [N]")
+    if positions.shape[0] == 0:
+        empty_index = torch.empty((2, 0), dtype=torch.long)
+        empty_vec = positions.new_empty((0, 3))
+        empty_weight = positions.new_empty((0,))
+        return empty_index, empty_vec, empty_weight, torch.zeros(1, dtype=torch.long)
+
+    max_num_neighbors = max(1, int(max_num_pairs) // int(positions.shape[0]))
+    edge_index = _radius_graph(
+        positions,
+        r=float(cutoff_upper),
+        batch=batch.to(dtype=torch.long),
+        loop=bool(loop),
+        max_num_neighbors=max_num_neighbors,
+        flow="source_to_target",
+    )
+    edge_vec = positions[edge_index[0]] - positions[edge_index[1]]
+    edge_weight = torch.linalg.vector_norm(edge_vec, dim=-1)
+    keep = (edge_weight >= float(cutoff_lower)) & (
+        edge_weight < float(cutoff_upper)
+    )
+    edge_index = edge_index[:, keep]
+    edge_vec = edge_vec[keep]
+    edge_weight = edge_weight[keep]
+    if edge_index.shape[1] > int(max_num_pairs):
+        edge_index = edge_index[:, : int(max_num_pairs)]
+        edge_vec = edge_vec[: int(max_num_pairs)]
+        edge_weight = edge_weight[: int(max_num_pairs)]
+    return (
+        edge_index,
+        edge_vec,
+        edge_weight,
+        torch.tensor([edge_index.shape[1]], dtype=torch.long),
+    )
 
 
 def visualize_basis(basis_type, num_rbf=50, cutoff_lower=0, cutoff_upper=5):
