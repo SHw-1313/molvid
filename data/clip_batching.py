@@ -368,6 +368,24 @@ def get_clip_specs(dataset: Any) -> ClipSpecTable:
         if not isinstance(table, ClipSpecTable):
             raise TypeError("clip_spec_table() must return ClipSpecTable")
         return table
+    if isinstance(dataset, torch.utils.data.Subset):
+        base_table = get_clip_specs(dataset.dataset)
+        specs = []
+        for local_index, base_index in enumerate(dataset.indices):
+            item = base_table[int(base_index)]
+            specs.append(
+                ClipItemSpec(
+                    index=local_index,
+                    atoms=item.atoms,
+                    frames=item.frames,
+                    task=item.task,
+                    time_bucket_id=item.time_bucket_id,
+                    native_delta_time_ps=item.native_delta_time_ps,
+                    physical_clip_span_ps=item.physical_clip_span_ps,
+                    sample_id=item.sample_id,
+                )
+            )
+        return ClipSpecTable.from_specs(specs)
     if isinstance(dataset, torch.utils.data.ConcatDataset):
         tables: list[ClipSpecTable] = []
         offset = 0
@@ -499,6 +517,7 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
         self.shuffle = bool(shuffle)
         self.replacement = bool(replacement)
         self.drop_last = bool(drop_last)
+        self._batches_per_epoch_explicit = batches_per_epoch is not None
         self.epoch = 0
         self._global_cache: tuple[int, list[list[int]]] | None = None
         self._validate_weights()
@@ -583,6 +602,36 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
 
     def _make_global_batches(self) -> list[list[int]]:
         rng = np.random.default_rng(self.seed + self.epoch)
+        if not self.replacement:
+            # Evaluation must cover every eligible record exactly once.  A
+            # weighted random choice of groups with a fixed batch budget can
+            # exhaust the budget before the last group is reached, silently
+            # dropping validation clips.  Pack each homogeneous group in
+            # order; optional shuffling only changes order within/among groups.
+            keys = list(self._groups)
+            if self.shuffle:
+                rng.shuffle(keys)
+            result: list[list[int]] = []
+            for key in keys:
+                positions = self._groups[key].copy()
+                if self.shuffle:
+                    rng.shuffle(positions)
+                batch: list[int] = []
+                cost = 0
+                for position in positions.tolist():
+                    item_cost = int(self.specs[position].effective_tokens)
+                    if batch and cost + item_cost > self.max_tokens:
+                        result.append(batch)
+                        batch = []
+                        cost = 0
+                    batch.append(int(self.specs[position].index))
+                    cost += item_cost
+                if batch:
+                    result.append(batch)
+            if self._batches_per_epoch_explicit:
+                return result[: self._batches_per_epoch]
+            return result
+
         orders: dict[tuple[int, int, str], np.ndarray] = {}
         cursors: dict[tuple[int, int, str], int] = {}
         for key, positions in self._groups.items():

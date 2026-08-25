@@ -253,3 +253,25 @@ Important boundary: C/D use the untouched original dyVAE, DynamicTrainer, collat
 - Evaluation implementation now reports validation loss using each checkpoint's saved config, loss schedule, and normalization statistics; the plot/CSV path includes validation total and component losses.
 - Validation: `python -m py_compile eval_codec.py evaluation/codec_evaluation.py scripts/plot_codec_results.py` passed; full `python -m pytest -q` passed (`41 passed`, one existing `torch.load(weights_only=False)` warning); output audit passed for checkpoints, 3,000 train records, 192 eval samples, loss fields, and plots.
 - Boundary: the two mistakenly started `PVB_origin` ATLAS-only jobs were interrupted before this run and are not used as evidence; the reference repository was not modified.
+
+### 2026-08-24 — ATLAS quarter-data 50-epoch workload probe
+
+- Status: workload/convergence probe only; no final checkpoint or evaluation report was produced. The user requested three controls, 50 complete epochs, and 1/4 of the previously prepared ATLAS half-data.
+- Implementation: `train_codec.py` now accepts `--max-epochs` and deterministic `--subset-fraction`, records subset size, batch count, normalization/training/total elapsed time, and supports sparse JSONL logging. `eval_codec.py` accepts the same validation subset fraction. `data/clip_batching.py` now derives cheap sampler metadata for `torch.utils.data.Subset` without decoding every selected NPZ payload.
+- Dataset/workload: fraction `0.25`, seed `20260810`; ATLAS train `25,389/101,556` records, valid `4,371/17,484` records; `8,313` batches per complete train epoch; `415,650` optimizer steps per control for 50 epochs; `log_every=100`.
+- Measurement: `ratio1_no_temporal` was started on GPU 7 with normalization fitting over 256 batches. Normalization took `9.47 s`. It was intentionally interrupted at step `600` after approximately `444.1 s` wall time, giving about `1.351 step/s`; projected remaining time is approximately `85.3 h` for one control and `10.6 days` for all three serialized controls.
+- Loss evidence: six records were written at steps 100–600; the observed minibatch total loss remained noisy (roughly `0.56–1.68` in the first records), so this short probe is not a 50-epoch convergence result. No checkpoint was saved and no evaluation was run.
+- The interruption was deliberate to avoid committing a ten-day GPU run without confirming the workload definition.
+
+
+### 2026-08-25 — ATLAS selected-trajectory 50-epoch training/evaluation
+
+- [x] Compute motion diagnostics for the three atom-count candidates and retain only non-static systems.
+- [x] Select 3 systems × 3 replicas; split clips 0–48 train and 49–61 validation for each trajectory.
+- [x] Complete all three modified-code controls for 50 loader epochs / 7,200 steps each, logging every 10 steps.
+- [x] Evaluate all 117 validation clips per control and generate loss/structure/dynamics plots.
+- [x] Verify train/validation sample-ID disjointness and add a no-replacement sampler test preventing silent validation tail drops.
+
+Evidence: `outputs/atlas_selected_trajectories/summary.json`, `clip_store/manifest.json`, `candidate_metrics.json`, each control's `train.log`/`train_metrics.jsonl`/`codec_step_00007200.pt`, and `evaluation/codec_eval.{json,md}` plus `evaluation/plots/`.
+
+Final validation is stratified only by the available native `dt_100ps` bucket. The epoch count is the current training sampler's loader-epoch definition; validation uses deterministic no-replacement coverage of every selected clip.

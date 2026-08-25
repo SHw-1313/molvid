@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from itertools import islice
 from pathlib import Path
 from typing import Any, Sequence
@@ -18,7 +19,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 import yaml
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, Subset
 
 from data.clip_batching import make_clip_dataloader
 from data.clip_dataset import ClipMMapDataset, collate_clip_records
@@ -40,6 +41,22 @@ def _dataset(roots: Sequence[str]) -> Any:
     return stores[0] if len(stores) == 1 else ConcatDataset(stores)
 
 
+def _fractional_subset(dataset: Any, fraction: float | None, seed: int) -> tuple[Any, dict[str, int | float]]:
+    if fraction is None:
+        return dataset, {"full_records": len(dataset), "selected_records": len(dataset), "fraction": 1.0}
+    fraction = float(fraction)
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("--subset-fraction must be in (0, 1]")
+    selected = max(1, int(len(dataset) * fraction))
+    rng = np.random.default_rng(int(seed))
+    indices = np.sort(rng.choice(len(dataset), size=selected, replace=False)).tolist()
+    return Subset(dataset, indices), {
+        "full_records": len(dataset),
+        "selected_records": selected,
+        "fraction": fraction,
+    }
+
+
 def _loader(dataset: Any, data_config: dict[str, Any], *, training: bool) -> Any:
     return make_clip_dataloader(
         dataset,
@@ -59,6 +76,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None, help="override training.device")
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--max-epochs", type=int, default=None, help="run this many complete train-loader epochs")
+    parser.add_argument("--subset-fraction", type=float, default=None, help="deterministically train/evaluate on this fraction of each dataset")
     parser.add_argument("--fit-normalization", action="store_true")
     parser.add_argument("--normalization-batches", type=int, default=None, help="bound normalization fitting to a deterministic number of train batches")
     parser.add_argument("--temporal-ratio", type=int, default=None)
@@ -94,16 +113,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     random.seed(data_seed)
     np.random.seed(data_seed)
     torch.manual_seed(data_seed)
-    train_config = CodecTrainConfig.from_mapping(raw)
+    if args.max_steps is not None and args.max_epochs is not None:
+        raise ValueError("--max-steps and --max-epochs are mutually exclusive")
+    if args.max_epochs is not None and int(args.max_epochs) < 1:
+        raise ValueError("--max-epochs must be positive")
     data_config = raw.get("data", {})
     if not isinstance(data_config, dict):
         raise ValueError("data config must be a mapping")
     train_dataset = _dataset(data_config.get("train_roots", []))
+    train_dataset, train_subset_info = _fractional_subset(
+        train_dataset, args.subset_fraction, data_seed
+    )
     train_loader = _loader(train_dataset, data_config, training=True)
     valid_loader = None
+    valid_subset_info = None
     valid_roots = data_config.get("valid_roots", [])
     if valid_roots:
-        valid_loader = _loader(_dataset(valid_roots), data_config, training=False)
+        valid_dataset, valid_subset_info = _fractional_subset(
+            _dataset(valid_roots), args.subset_fraction, data_seed + 1
+        )
+        valid_loader = _loader(valid_dataset, data_config, training=False)
+
+    batches_per_epoch = len(train_loader)
+    max_steps = args.max_steps
+    if args.max_epochs is not None:
+        max_steps = int(args.max_epochs) * batches_per_epoch
+    train_config = CodecTrainConfig.from_mapping(raw)
+    if max_steps is not None:
+        train_config.max_steps = int(max_steps)
+    print(json.dumps({
+        "train_subset": train_subset_info,
+        "valid_subset": valid_subset_info,
+        "batches_per_epoch": batches_per_epoch,
+        "requested_epochs": args.max_epochs,
+        "requested_steps": max_steps,
+    }, sort_keys=True))
 
     model_config = raw.get("model", {})
     if not isinstance(model_config, dict):
@@ -118,7 +162,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     trainer = CodecTrainer(model, train_loader, valid_loader, train_config)
     if args.resume is not None:
         trainer.load_checkpoint(args.resume)
+    normalization_elapsed_s = 0.0
     if args.fit_normalization:
+        normalization_started = time.perf_counter()
         if args.normalization_batches is not None:
             if args.normalization_batches < 1:
                 raise ValueError("--normalization-batches must be positive")
@@ -126,24 +172,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             normalization_source = train_loader
         stats = trainer.fit_normalization(normalization_source)
-        print(json.dumps({key: value.as_dict() for key, value in stats.items()}, indent=2))
+        normalization_elapsed_s = time.perf_counter() - normalization_started
+        print(json.dumps({
+            "normalization_elapsed_s": normalization_elapsed_s,
+            "normalization_stats": {key: value.as_dict() for key, value in stats.items()},
+        }, indent=2))
     if args.dry_run:
         batch = next(iter(train_loader))
         print(json.dumps(trainer.evaluate_batch(batch), sort_keys=True))
         return 0
     save_dir = Path(raw.get("training", {}).get("save_dir", "ckpt/codec"))
     log_path = args.log_path if args.log_path is not None else save_dir / "train_metrics.jsonl"
+    training_started = time.perf_counter()
     metrics = trainer.run(
-        max_steps=args.max_steps,
+        max_steps=max_steps,
         log_path=log_path,
         log_every=args.log_every,
     )
+    training_elapsed_s = time.perf_counter() - training_started
     checkpoint = save_dir / f"codec_step_{trainer.step:08d}.pt"
     trainer.save_checkpoint(checkpoint)
     print(json.dumps({
         "checkpoint": str(checkpoint),
         "log": str(log_path),
         "step": trainer.step,
+        "completed_epochs": trainer.step // batches_per_epoch,
+        "batches_per_epoch": batches_per_epoch,
+        "normalization_elapsed_s": normalization_elapsed_s,
+        "training_elapsed_s": training_elapsed_s,
+        "total_elapsed_s": normalization_elapsed_s + training_elapsed_s,
         "metrics": metrics,
     }, sort_keys=True))
     return 0

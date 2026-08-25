@@ -16,6 +16,7 @@ from torch.utils.data import ConcatDataset
 from data.clip_batching import make_clip_dataloader
 from data.clip_dataset import ClipMMapDataset, collate_clip_records
 from evaluation.codec_evaluation import evaluate_controls, model_control, write_report
+from train_codec import _fractional_subset
 from trainer.codec_losses import compute_codec_losses
 from trainer.codec_trainer import CodecTrainConfig, PVBCodecModel, _to_device
 
@@ -73,6 +74,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--ratio1-temporal-checkpoint", type=Path, default=None)
     parser.add_argument("--ratio4-temporal-checkpoint", type=Path, default=None)
     parser.add_argument("--valid-root", action="append", default=None)
+    parser.add_argument("--subset-fraction", type=float, default=None, help="deterministically evaluate on this fraction of the validation dataset")
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args(argv)
     with args.config.open(encoding="utf-8") as handle:
@@ -97,6 +99,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     device = torch.device(selected)
     data_config = raw.get("data", {})
     dataset = _dataset(data_config.get("valid_roots", []))
+    dataset, subset_info = _fractional_subset(
+        dataset, args.subset_fraction, seed + 1
+    )
     loader = make_clip_dataloader(
         dataset,
         max_tokens=int(data_config.get("max_tokens", 4096)),
@@ -153,6 +158,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     report = evaluate_controls(controls, loader, max_batches=args.max_batches, device=device)
+    report["evaluation_data"] = {
+        "subset": subset_info,
+        "max_batches": args.max_batches,
+    }
     write_report(report, args.json, args.markdown)
     print(f"wrote {args.json} and {args.markdown}")
     return 0

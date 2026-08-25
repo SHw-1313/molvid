@@ -235,3 +235,26 @@ def test_indexed_clip_specs_drive_loader(tmp_path):
     assert summarize_clip_batch(batch)["effective_tokens"] == 8
     dataset.close()
 
+
+
+def test_no_replacement_loader_covers_all_groups_without_silent_tail_drop():
+    specs = ClipSpecTable.from_specs(
+        [
+            ClipItemSpec(
+                index=index,
+                atoms=atoms,
+                frames=16,
+                task="trajectory",
+                time_bucket_id="dt_100ps",
+            )
+            for index, atoms in enumerate([887] * 13 + [1503] * 13 + [2499] * 13)
+        ]
+    )
+    sampler = TaskAwareClipBatchSampler(
+        specs,
+        max_tokens=80000,
+        shuffle=False,
+        replacement=False,
+    )
+    seen = [index for batch in sampler for index in batch]
+    assert seen == list(range(39))
