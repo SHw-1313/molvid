@@ -275,3 +275,163 @@ Important boundary: C/D use the untouched original dyVAE, DynamicTrainer, collat
 Evidence: `outputs/atlas_selected_trajectories/summary.json`, `clip_store/manifest.json`, `candidate_metrics.json`, each control's `train.log`/`train_metrics.jsonl`/`codec_step_00007200.pt`, and `evaluation/codec_eval.{json,md}` plus `evaluation/plots/`.
 
 Final validation is stratified only by the available native `dt_100ps` bucket. The epoch count is the current training sampler's loader-epoch definition; validation uses deterministic no-replacement coverage of every selected clip.
+
+
+## T11 — molvid graph engineering v1.2 Phase A/B
+
+- [x] Read every file under `molvid_graph_engineering_v1_2_reviewed/` before implementation.
+- [x] Replace the production graph path with an explicit CUDA-only radius backend; CPU construction remains only `dense_test`.
+- [x] Add bounded CPU canonical/per-device topology caches and GPU bond-code-only union.
+- [x] Add FP32 geometry/loss islands, BF16 autocast, pinned multi-worker loading, exact sampler/resume state, and explicit oversize errors.
+- [x] Add complete `config/codec_engineering_full.yaml` and runnable Phase-A acceptance evidence.
+- [x] Run Phase-A fixed real-batch, BF16, 200-step, five exact tiny-epoch, worker/pinned, warmup/resume, and throughput checks on CUDA.
+- [x] Run Phase B only after the Phase-A commit; report distance-only precision/recall/F1/Jaccard, degree/isolated/component diagnostics, and its short checks.
+
+### 2026-08-25 — Phase A evidence
+
+- The acceptance runner is `scripts/run_engineering_acceptance.py`; command: `PYTHONPATH=/workspace/PVB python scripts/run_engineering_acceptance.py`.
+- Evidence: `outputs/engineering_v1/phase_a/acceptance.json`, `phase_a/repaired_contract/*.pt`, `topology_200_steps.jsonl`, `topology_200_steps.pt`, and `topology_five_epochs.jsonl`.
+- CUDA runtime: torch `2.5.1+cu121`, CUDA `12.1`, `torch_cluster 1.6.3+pt25cu121`, A100-SXM4-80GB. GPU absence remains a hard error in the runtime and acceptance runner.
+- Fixed real batch: `T=16`, `N=4435`, `B=5`, `70960` atom-frame tokens. All three controls preserved parameter counts `593992`, `1974904`, and `3356074`; graph tensors stayed on CUDA; supplied directed bond flags were exact and unique.
+- Real loader: 2 workers, pinned batch, 152 no-replacement batches, explicit oversize error for the lower-budget probe. BF16 total-loss relative errors were `2.60e-5`, `2.27e-3`, and `2.60e-4` for the three controls.
+- The topology tiny run completed 200 optimizer steps with 20 records and checkpoint/resume; five exact tiny epochs covered all 8 clips exactly once per epoch. Repaired BF16 throughput multipliers versus T00 were `2.759x`, `2.319x`, and `2.088x`.
+- Important honest boundary: the historical CPU nanoflann cap set is not bitwise identical to CUDA. The audit records `12539` removed and `12512` added distance edges, with `0` bond-edge differences. The repaired contract explicitly uses CUDA source-order capping and does not claim historical CPU numerical identity; no quality/convergence or full-data claim is made.
+
+
+### 2026-08-25 — Phase B evidence
+
+- Status: complete. Phase A was committed as `c2ad46d` before the Phase-B launch. The Phase-B path is CUDA-only and raises on missing CUDA or `torch_cluster.radius_graph`; no CPU fallback was used.
+- Runner: `PYTHONPATH=/workspace/PVB python scripts/run_phase_b_acceptance.py`. Evidence: `outputs/engineering_v1/phase_b/acceptance.json`.
+- Canonical references: all 558 train/valid clips were scanned; the lexicographically earliest `sample_id` per stable `topology_id` was selected for the three systems: `atlas_1v7r_A`, `atlas_2wlt_A`, and `atlas_5e3e_A`. The model receives only canonical FP32 coordinates for distance bond inference.
+- Distance-only diagnostics (inferred versus supplied undirected bonds): 1v7r has 1600/1543 edges, precision 0.964375, recall 1.0, F1 0.981864; 2wlt has 2628/2534, precision 0.964231, recall 1.0, F1 0.981790; 5e3e has 955/913, precision 0.956021, recall 1.0, F1 0.977516. All inferred and supplied graphs have one connected component and zero isolated atoms; full distance, degree, and component statistics are in the JSON.
+- Boundary and independence gates passed: `0.5 < d <= 2.2` including the exact tested upper boundary, and mutating `atype`, `btype`, `block_id`, and supplied `bond_index` did not change graph edges/bond flags.
+- Common initialization matched all 86 state keys with seed 20260825. Both modes used the same AdamW/fp32 contract, completed 200 steps with 20 log records and checkpoint/resume, and completed five exact two-batch epochs covering all eight tiny clips each epoch.
+- Honest boundary: the distance rule deliberately adds near-neighbor edges beyond the supplied covalent list; these are diagnosed rather than hidden. This is an architecture/graph acceptance result, not a convergence, quality, full-data, or long-run claim.
+
+
+## 2026-08-26 — selected three-system real-data overfitting
+
+- [x] Check whether the selected ATLAS systems already had a real-data overfit result; only the earlier two-clip synthetic decoder test existed.
+- [x] Run the three full-width modified-code topology controls from fresh initialization on one fixed train clip per selected system: `atlas_5e3e_A_R1_w000000`, `atlas_1v7r_A_R1_w000000`, and `atlas_2wlt_A_R1_w000000`.
+- [x] Complete 500 optimizer steps per control, log every 10 steps, evaluate the aggregate batch and each system separately, save checkpoints, and record synchronized CUDA wall time.
+
+Evidence: `outputs/atlas_selected_trajectories/overfit_three_systems/run_20260826T094444/summary.json`, each control's `result.json`, `train_metrics.jsonl`, and `codec_step_00000500.pt`. Reproducible runner: `scripts/run_selected_three_system_overfit.py`.
+
+The fixed batch contains 3 clips, 16 frames, 4,889 packed atoms, and 78,224 atom-frame tokens; it uses only the selected training split and no validation clip. This is three settings, one per control. It is not a 3-control x 2-bond-mode six-setting ablation.
+
+Results (aggregate total loss, initial -> final; training time / total time): ratio1/no-temporal `1.604981 -> 0.689677`, 57.03% reduction, `900.655 s / 907.993 s`; ratio1/temporal `1.693397 -> 0.320974`, 81.05% reduction, `1025.914 s / 1032.150 s`; ratio4/temporal `1.697092 -> 0.403721`, 76.21% reduction, `1069.343 s / 1074.834 s`. Whole run wall time was `3016.762 s` (50.28 min), including selection and setup. All three controls have `fit_status=loss_decreased`.
+
+This is a memorization/capacity diagnostic on three train clips, not a validation, generalization, convergence, or scientific-quality claim. GPU was required and used; no CPU fallback was enabled.
+
+
+### 2026-08-26 — Selected three-system real-data distance-only overfit
+
+- [x] Reuse the selected three-system train-only overfit batch and the three existing controls with bond_construction.mode=distance_only.
+- [x] Use one canonical FP32 first-frame reference per selected system; do not use supplied bond/atom topology for distance-only inference.
+- [x] Complete 500 optimizer steps per control, log every 10 steps, evaluate the aggregate batch and each system separately, save checkpoints, and record synchronized CUDA wall time.
+
+Evidence: outputs/atlas_selected_trajectories/overfit_three_systems_distance_only/run_20260826T105636/summary.json, each control's result.json, train_metrics.jsonl, and codec_step_00000500.pt. The reproducible runner is scripts/run_selected_three_system_overfit.py --bond-mode distance_only.
+
+The protocol matches the topology overfit gate: the three fixed train clips are atlas_5e3e_A_R1_w000000, atlas_1v7r_A_R1_w000000, and atlas_2wlt_A_R1_w000000; T=16, 4,889 packed atoms, 78,224 atom-frame tokens, no validation samples, fresh initialization, AdamW, fp32, and 10-step logging. This is three additional settings; topology plus distance-only together are the six-setting bond-mode ablation.
+
+| Control | Initial total | Final total | Reduction | Training s | Total s |
+|---|---:|---:|---:|---:|---:|
+| ratio1/no-temporal | 1.604809 | 0.725967 | 54.76% | 440.992 | 444.366 |
+| ratio1/temporal | 1.698666 | 0.304935 | 82.05% | 631.662 | 636.098 |
+| ratio4/temporal | 1.697084 | 0.396296 | 76.65% | 921.927 | 926.117 |
+
+The whole distance-only run took 2,008.609 s (33.48 min). All three controls have fit_status=loss_decreased. The run used CUDA cuda:0 on NVIDIA A100-SXM4-80GB with torch 2.5.1+cu121 and torch_cluster 1.6.3+pt25cu121; no CPU fallback was enabled.
+
+This remains a train-set memorization/capacity diagnostic, not a validation, generalization, convergence, or scientific-quality claim. The distance-only graph intentionally follows the Phase-B interval policy and can include near-neighbor edges beyond supplied covalent bonds; full loss components and per-system totals remain in each result.json.
+
+
+### 2026-08-26 - Distance-only overfit evaluation and visualization
+
+- [x] Evaluate all three distance-only step-500 checkpoints with the existing PVB-style round-trip metrics.
+- [x] Generate the loss curve, loss-component/evaluation plot, reconstruction plot, dynamics plot, and CSV.
+- [x] Make generic evaluation/report labels split-aware so this train-only overfit report is not mislabeled as validation.
+
+The evaluator is scripts/evaluate_selected_three_system_overfit.py; run this distance-only round with --bond-mode distance_only (topology uses --bond-mode topology). Evidence: outputs/atlas_selected_trajectories/overfit_three_systems_distance_only/run_20260826T105636/codec_eval.json and codec_eval.md; plots are under the same run directory's plots/ folder as loss_curves, eval_loss, eval_reconstruction, eval_dynamics in PNG/PDF and eval_metrics.csv.
+
+Evaluation used the same three selected train clips, as three one-clip batches; the reported metric values are the unweighted mean over the three systems. It is not held-out validation. The dt_100ps results were:
+
+| Control | Train total loss | Frame-0 RMSD | Future RMSD | Future dRMSD | Future bond RMSE | Velocity RMSE | Acceleration RMSE | Frequency retention |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ratio1/no-temporal | 0.768195 | 0.944104 | 1.362365 | 0.986531 | 0.359487 | 0.00679080 | 0.000113960 | 0.428431 |
+| ratio1/temporal | 0.315043 | 0.812106 | 0.815740 | 0.611587 | 0.286700 | 0.00513803 | 0.0000858913 | 0.656172 |
+| ratio4/temporal | 0.417614 | 0.353831 | 0.915999 | 0.678755 | 0.168251 | 0.00705834 | 0.000120152 | 0.395787 |
+
+Per-control PVB-style evaluation times were 608.821 s, 575.310 s, and 547.617 s (sum 1,731.747 s, 28.86 min). The evaluation was CUDA-enabled for model inference; the existing metric implementation moves predictions to CPU for pairwise dRMSD/contact statistics, which explains the long wall time. The loss curve uses the 50 records from steps 10 through 500 with smoothing window 5. The report and plot titles identify the source as Train.
+
+
+### 2026-08-26 - Topology overfit evaluation and visualization
+
+- [x] Evaluate the three existing topology step-500 checkpoints with the same PVB-style round-trip metrics used for distance-only.
+- [x] Generate the topology loss curve, evaluation-loss, reconstruction, dynamics plots, and metrics CSV.
+- [x] Keep the topology and distance-only artifacts in separate run directories and label both reports as train-split diagnostics.
+
+The topology training itself had already completed; its evaluation/visualization deliverables were accidentally omitted and were repaired without retraining. The first relaunch exposed a missing evaluator import before metric computation; it was fixed, rerun, and completed normally.
+
+Evidence: `outputs/atlas_selected_trajectories/overfit_three_systems/run_20260826T094444/codec_eval.json` and `codec_eval.md`; plots are under the same run directory's `plots/` folder as `loss_curves`, `eval_loss`, `eval_reconstruction`, `eval_dynamics` in PNG/PDF and `eval_metrics.csv`.
+
+Evaluation used the same three selected train clips as three one-clip batches; values are the unweighted mean over the three systems, not held-out validation. The `dt_100ps` results were:
+
+| Control | Train total loss | Frame-0 RMSD | Future RMSD | Future dRMSD | Future bond RMSE | Velocity RMSE | Acceleration RMSE | Frequency retention |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ratio1/no-temporal | 0.738477 | 0.923680 | 1.328758 | 0.964085 | 0.360980 | 0.00672182 | 0.000112805 | 0.450899 |
+| ratio1/temporal | 0.332049 | 0.812389 | 0.842627 | 0.630928 | 0.293975 | 0.00520169 | 0.0000868247 | 0.646337 |
+| ratio4/temporal | 0.426532 | 0.378307 | 0.926879 | 0.691459 | 0.177938 | 0.00708774 | 0.000120524 | 0.389279 |
+
+PVB-style evaluation wall times were 572.452 s, 57.610 s, and 9.465 s (sum 639.528 s, 10.66 min); GPU inference and CPU pairwise metric work are both included. The loss curve uses all 50 training records (steps 10 through 500) with smoothing window 5. Together with the distance-only run, all six settings now have training logs, checkpoints, eval reports, and plots.
+
+## 2026-08-27 — Luna review repair (P1-A through P2-G)
+
+- [~] P1-A: move topology registration before CUDA transfer through the shared `prepare_batch_then_to_device` helper; remove hidden forward preparation; update standard evaluation and DDP smoke callers. Real CUDA evaluator/DDP acceptance remains unverified while GPUs are occupied.
+- [x] P1-B: persist the versioned v2 model/graph contract, distance-reference contract, and optimizer contract; reconstruct/check evaluator models; require explicit graph mode for v1 checkpoints.
+- [x] P1-C: validate semantic training/sampler/model/normalization contracts before mutation, permit only a larger `max_steps`, and roll back state if application fails.
+- [~] P1-D: implement executable FP32/BF16/SE(3) gates and immutable-reference manifest verification. The code is ready, but the external repaired FP32 reference manifest is not present and the GPUs are occupied, so the real fixed-batch gate is intentionally not marked passed.
+- [x] P2-E: select distance-only references from the train split only and record sample IDs, split provenance, coordinate/identity hashes, and inferred-bond hashes.
+- [~] P2-F: remove production forward-path CUDA scalar extraction/CPU graph copies and add a CUDA profiler. A current after-profile and before/after comparison remain unverified because no free GPU and no pre-fix profiler baseline are available.
+- [~] P2-G: add the tracked-artifact inventory/guard and checked-in metadata. The existing branch still contains approximately 1.90 GiB of tracked binary data, including generated checkpoints; moving it to an approved store or reconstructing history requires operator approval and was not attempted.
+- [x] Additional cache scalability: retain CPU canonical coordinates so bounded distance-only GPU-cache eviction can rehydrate entries, and validate exact atom count plus atom-identity hash.
+- [x] Add contract/regression coverage and run the complete test suite.
+
+Evidence and limits:
+
+- Targeted Luna/codec tests: `17 passed`; final full-suite result must be recorded after the final verification command.
+- No long training, full-data evaluation, GPU process termination, package installation, network access, checkpoint deletion, or Git history rewrite was performed.
+- The hard-CUDA production policy remains unchanged: missing CUDA or the CUDA radius extension raises an error; `dense_test` is explicit CPU-only test infrastructure.
+- `agents/TRACKED_ARTIFACT_INVENTORY.json` records path, size, purpose, and SHA-256 for all currently tracked binary artifacts. `scripts/check_tracked_artifacts.py --check` is expected to fail until the operator approves artifact migration/history cleanup.
+
+### 2026-08-27 — Continued GPU validation
+
+- [x] Generated the immutable repaired-CUDA reference on GPU 5; the manifest contains all three controls.
+- [x] Ran the real Phase-A acceptance before the follow-up synchronization fix. It passed the fixed-batch FP32/BF16/SE(3), optimizer, epoch-coverage, source-audit, and throughput gates; evidence is outputs/engineering_v1/phase_a/acceptance.json.
+- [x] Fixed an acceptance-harness bug found during the first run: the CUDA backward pass was accumulating into the CPU leaf used as the dense position-gradient reference. The reference is now cloned and the CPU leaf gradient cleared before transfer.
+- [x] Ran topology and distance-only after-only profiles. Results are in outputs/engineering_v1/profiling/topology.json and distance_only.json; data wait was 0.093 ms/step and 0.052 ms/step respectively.
+- [x] Fixed the remaining known CUDA scalar source in the graph path by passing host-derived batch_size explicitly to torch_cluster.radius_graph; the production neighbor API now rejects an omitted batch size instead of allowing the dependency to call int(batch.max()).
+- [x] Re-ran the complete test suite after these changes: 53 passed, 1 pre-existing warning.
+- [~] Replaying the full acceptance and after-only profiles on the post-batch_size code, plus the two-rank NCCL DDP smoke, remains pending because the GPU snapshot after profiling showed no safely idle GPU pair.
+- [~] P2-G remains an operator-approved artifact migration/history-cleanup task.
+
+
+### 2026-08-27 — Post-patch GPU validation completed
+
+- [x] Replayed the real Phase-A acceptance after the explicit graph-cardinality repair. The current acceptance artifact is passed and covers the fixed-batch FP32, BF16, optimizer, epoch-coverage, SE(3), source-audit, and throughput gates.
+- [x] Ran the two-rank NCCL DDP smoke on host GPUs 0 and 1. The run passed with world size 2, backend NCCL, and loss 0.01264182198792696.
+- [x] Ran the post-patch topology and distance-only runtime profilers on host GPU 5. Median step latency was 0.910600657 s and 0.653270512 s, respectively; data-wait means were 0.05807 ms/step and 0.05285 ms/step.
+- [x] Ran the standard CUDA evaluator on one validation batch (five selected records) for all three controls. The reports confirm the standard predictor ordering and metric path; because no trained checkpoint was supplied, this is an execution diagnostic, not a quality or convergence result.
+- [x] Rechecked the full suite and compilation after the code repair: 53 tests passed with one pre-existing torch.load warning, and compileall passed.
+- [~] P2-F has final after-only profiling evidence, but no before/after timing claim is made because no pre-fix profiler baseline was captured. P2-G still requires operator-approved artifact migration/history cleanup.
+
+Evidence: outputs/engineering_v1/phase_a/acceptance.json, outputs/engineering_v1/ddp_smoke.json, outputs/engineering_v1/profiling/topology.json, outputs/engineering_v1/profiling/distance_only.json, outputs/engineering_v1/standard_eval_one_batch.json, and outputs/engineering_v1/standard_eval_one_batch.md.
+
+
+### 2026-08-28 — Tracked binary artifact cleanup
+
+- [x] Removed exactly 29 generated checkpoint/engineering binaries under outputs/ from the Git index with git rm --cached; local files were preserved.
+- [x] Added ignore rules for generated outputs binaries with .pt, .pth, .ckpt, .safetensors, .pkl, and .pickle suffixes.
+- [x] Refreshed the tracked-artifact inventory and ran the guard: one intentionally retained source asset remains, 21,697 bytes total, with zero policy violations.
+- [~] Historical Git objects were not rewritten or force-pushed. The current index/worktree cleanup is complete; a separate reviewed history purge would be required if repository size must also be reduced retroactively.
+
+Evidence: agents/TRACKED_ARTIFACT_INVENTORY.json, scripts/check_tracked_artifacts.py --check, and the staged index deletions shown by git diff --cached.

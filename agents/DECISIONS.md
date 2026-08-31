@@ -134,3 +134,109 @@ These are parameters, not permission to redesign the architecture:
 6. Available A100 memory (40 GB or 80 GB), which sets the initial `T*N` bound.
 
 The worker should implement synthetic/CPU-safe portions without these values, use explicit config placeholders, and stop before a data/GPU gate that genuinely needs them.
+
+
+## D021 — Strict CUDA graph runtime and hard GPU failure
+
+**Decision:** Production clip graph construction uses the explicit `cuda_radius` backend and the codec trainer's production `auto`/CUDA selections hard-fail when CUDA is unavailable. `dense_test` is the only CPU graph backend and must be selected explicitly.
+
+**Why:** The graph is part of the model's numerical contract. A silent CPU fallback hides container/device failures and changes the execution path. Dataset registration occurs on the CPU batch before transfer; CUDA forward does not copy graph inputs back to host.
+
+## D022 — Reconciled CUDA cap policy is explicit, historical CPU identity is not claimed
+
+**Decision:** The repaired topology path uses the CUDA radius kernel's configured neighbor cap with source-order output. Distance-only inference uses a bounded CUDA over-query solely to prove its independent cap is not saturated. The old CPU nanoflann traversal is retained only as an audit reference; it is not emulated by a hidden CPU call or represented as numerically identical.
+
+**Why:** The old CPU and CUDA extensions have different candidate traversal semantics when a target has more than the cap. The fixed real audit found only distance-edge differences (`12539` removed, `12512` added; zero bond-edge differences), but the difference is enough to invalidate a historical bitwise claim. A deterministic GPU policy plus a saved repaired reference is auditable and keeps the production path device-resident.
+
+## D023 — Phase-A acceptance evidence is bounded, not a training-quality result
+
+**Decision:** Phase A uses fixed-batch checks, 200 optimizer steps, and five exact tiny epochs only. It does not start a 50-epoch/full-data run and does not make convergence or scientific-quality claims. Phase B is a separately labeled distance-only ablation and starts only after the Phase-A commit.
+
+**Why:** The reviewed acceptance packet explicitly separates engineering gates from model-quality experiments; short finite checks cannot support convergence conclusions.
+
+
+## D024 — Canonical-coordinate CUDA distance-only ablation
+
+**Decision:** Phase B uses `bond_construction.mode: distance_only`, selects one deterministic canonical reference per stable topology id, and infers bonds only from CUDA FP32 reference coordinates with the strict interval `0.5 < d <= 2.2 Å`. Supplied atom labels, block labels, atom-source indices, and supplied bond indices are not inputs to inference.
+
+**Why:** This isolates the requested distance-only architecture from the stored topology graph while preserving a reproducible reference choice. The extra edges are a measurable consequence of the interval rule, so precision/recall/F1/Jaccard and graph diagnostics are mandatory and are stored with the acceptance evidence. Missing CUDA remains a hard error; there is no CPU fallback.
+
+
+## D025 — Three-setting real-data overfit gate
+
+**Decision:** The selected-system overfit gate is three settings: the three full-width topology controls, each trained from fresh initialization on one fixed training clip from each of the three selected systems. It is not six settings; adding distance-only would be a separate 3-by-2 bond-mode ablation.
+
+**Why:** This isolates model memorization capacity on the selected systems while keeping the comparison aligned with the existing three-control experiment. The gate reports synchronized CUDA time and per-system loss but does not convert training-set loss reduction into a validation or quality claim.
+
+
+## D026 — Three-setting distance-only real-data overfit ablation
+
+**Decision:** Repeat the selected-system overfit gate with the same three controls, data batch, optimizer, and 500-step logging policy under bond_construction.mode: distance_only. Use one deterministic canonical FP32 first-frame reference per selected system and keep this round separate from the topology round.
+
+**Why:** This makes the previously discussed six-setting comparison explicit as three topology controls plus three distance-only controls. It isolates the effect of graph construction while preserving the model/control and data protocol. Supplied bond/atom topology is excluded from distance-only inference, CUDA absence remains a hard error, and the resulting train loss is not treated as validation or scientific-quality evidence.
+
+
+## D027 - Split-aware evaluation reports and plots
+
+**Decision:** Evaluation Markdown and plot titles derive their split label from evaluation_data.source_split. Train-only overfit reports must be labeled Train, while ordinary validation reports retain the Validation label.
+
+**Why:** The same PVB-style metric code is used for train diagnostics and held-out evaluation. A fixed Validation label would misrepresent a train-clip memorization test. The split-aware label preserves the shared evaluator while making the evidence boundary explicit.
+
+
+## D028 - Both bond-mode rounds share the evaluation and visualization contract
+
+**Decision:** Every selected-system overfit bond-mode round must provide its own checkpoint-matched PVB-style report and plots: all logged loss records, train-split total/component loss, reconstruction metrics, dynamics metrics, and time-bucket CSV. Topology and distance-only outputs remain in separate run directories.
+
+**Why:** The six-setting ablation consists of three topology controls plus three distance-only controls. Training completion alone is not a complete deliverable; omitting evaluation or plots for one bond mode makes the comparison incomplete and can hide which graph path was actually evaluated. The evaluator records the bond mode explicitly and registers topology from the CPU batch before CUDA inference.
+
+## D029 — Versioned codec model and resume contracts
+
+**Decision:** New codec checkpoints use `pvb.codec.checkpoint.v2` and persist JSON-safe model/graph, distance-reference, optimizer, normalization, and sampler contracts. Resume compares all semantic fields exactly and permits only an explicit `max_steps` extension. `pvb.codec.checkpoint.v1` is accepted only through an explicit legacy flag; PVB v1 loads also require an explicit bond mode.
+
+**Why:** Parameter keys and shapes are intentionally shared by topology and distance-only models, so `load_state_dict()` cannot detect graph-semantic drift. A checkpoint must therefore describe the complete forward and optimizer contract independently of parameter tensors.
+
+## D030 — Immutable external FP32 reference gate
+
+**Decision:** The Phase-A real-batch FP32 regression uses an externally supplied, hashed repaired-CUDA reference manifest. The acceptance runner fails if that manifest is absent and never regenerates it during comparison. A separate operator-run builder creates the manifest only when the GPU is available and the artifact destination has been reviewed.
+
+**Why:** Generating a reference and comparing against it in one run would make the regression tautological. The historical CPU and repaired CUDA cap policies also differ, so the real reference must be versioned as the repaired CUDA contract; cap-unsaturated synthetic CUDA-vs-dense checks remain a separate equivalence gate.
+
+## D031 — Train-only distance-reference provenance
+
+**Decision:** Training distance-only graph references are selected from the training records only. Each frozen reference records the canonical sample ID, source split, atom count, atom-identity hash, coordinate hash, and inferred-bond hash; evaluation compares the checkpoint reference contract instead of deriving a graph from validation targets.
+
+**Why:** A validation coordinate must never determine a graph used by training. Exact identity and provenance checks also prevent an evicted/reloaded reference from being silently reused for a different topology.
+
+## D032 — Host metadata plus device-resident CUDA hot path
+
+**Decision:** Immutable atom counts/offsets and atom-identity hashes are captured during CPU collation/registration. Production CUDA graph construction uses device-resident geometry and async device assertions; one-time scalar/hash work is confined to canonical cache registration. A profiler records after-only measurements unless an explicit pre-fix baseline is supplied.
+
+**Why:** Repeated `.item()`, Python branching on CUDA scalars, or CUDA-to-CPU graph copies in every forward introduce synchronization proportional to batch size. Moving static checks to the CPU boundary preserves correctness while keeping the forward path asynchronous.
+
+## D033 — Artifact guard without unapproved history mutation
+
+**Decision:** Add a read-only tracked-binary inventory and CI guard, retain small manifests/metadata in Git, and stop before deleting blobs or rewriting history. The current inventory is evidence of the existing violation; artifact-store migration, Git LFS adoption, or clean-history reconstruction requires an operator-approved exact plan.
+
+**Why:** Removing files in a later commit would not remove their historical Git objects, while deleting or rewriting user artifacts without an approved preservation path is unsafe.
+
+### D034 — Supply graph cardinality to the CUDA radius wrapper
+
+torch_cluster.radius_graph computes batch_size with Python int(batch.max()) when its optional argument is omitted. The repaired production graph path now receives the graph count from host-known frame/sample shapes and forwards it explicitly. CudaRadiusNeighborList rejects omitted cardinality; no CUDA-to-CPU inference or fallback is permitted.
+
+### D035 — Freeze dense reference gradients before CUDA transfer
+
+A tensor transfer can preserve the autograd edge from a CPU leaf to its CUDA copy. The synthetic CUDA-vs-dense acceptance fixture therefore clones the dense position gradient and clears the CPU leaf gradient before the CUDA backward pass. This prevents the candidate gradient from being accumulated into the reference and falsely failing the regression.
+
+
+### D036 — Serialize GPU validation and report evaluator scope explicitly
+
+Use only GPUs observed to be idle, run the independent NCCL smoke on a pair, and serialize the heavier acceptance/profile/evaluator jobs on one card. Do not terminate or preempt existing processes. Record the standard evaluator's checkpoint and batch scope; a one-batch run with freshly initialized models validates CUDA execution and metric plumbing only, not training quality or convergence. Post-patch profiler results are reported as after-only unless a real pre-fix baseline exists.
+
+Why: the validation request concerns the repaired runtime, while other users' jobs remain out of scope. Clear scope labels prevent an execution smoke from being mistaken for a scientific result, and an after-only measurement cannot support a before/after performance claim.
+
+
+### D037 — Remove generated binaries from the current index, preserve local results
+
+For the operator-approved cleanup, remove the 29 generated binary artifacts under outputs/ with git rm --cached, retain their local working-tree copies, and add suffix-specific outputs ignore rules. Keep module/equiformer_v2/Jd.pt because it is a small source dependency. Do not run filter-repo, delete historical objects, or force-push as part of this working-tree cleanup.
+
+Why: this removes generated checkpoints from the repository's current tracked state without destroying experiment results or rewriting shared history. A historical size purge is a separate destructive operation requiring its own reviewed target list and recovery plan.

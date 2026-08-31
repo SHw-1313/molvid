@@ -41,6 +41,15 @@ def get_neighbor_pairs_kernel(
         raise ImportError(
             "torch_cluster.radius_graph is required for optimized neighbor search"
         )
+    if positions.device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError(
+            "OptimizedDistance requires CUDA coordinates; refusing a CPU "
+            "graph fallback"
+        )
+    if positions.dtype != torch.float32:
+        raise RuntimeError("OptimizedDistance requires original FP32 coordinates")
+    if batch.device != positions.device:
+        raise RuntimeError("neighbor positions and batch must share the CUDA device")
     if positions.ndim != 2 or positions.shape[-1] != 3:
         raise ValueError("positions must have shape [N, 3]")
     if batch.ndim != 1 or batch.shape[0] != positions.shape[0]:
@@ -52,14 +61,15 @@ def get_neighbor_pairs_kernel(
         return empty_index, empty_vec, empty_weight, torch.zeros(1, dtype=torch.long)
 
     max_num_neighbors = max(1, int(max_num_pairs) // int(positions.shape[0]))
-    edge_index = _radius_graph(
-        positions,
-        r=float(cutoff_upper),
-        batch=batch.to(dtype=torch.long),
-        loop=bool(loop),
-        max_num_neighbors=max_num_neighbors,
-        flow="source_to_target",
-    )
+    with torch.no_grad():
+        edge_index = _radius_graph(
+            positions,
+            r=float(cutoff_upper),
+            batch=batch.to(dtype=torch.long),
+            loop=bool(loop),
+            max_num_neighbors=max_num_neighbors,
+            flow="source_to_target",
+        )
     edge_vec = positions[edge_index[0]] - positions[edge_index[1]]
     edge_weight = torch.linalg.vector_norm(edge_vec, dim=-1)
     keep = (edge_weight >= float(cutoff_lower)) & (
@@ -350,8 +360,8 @@ class OptimizedDistance(torch.nn.Module):
             batch = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
         edge_index, edge_vec, edge_weight, num_pairs = get_neighbor_pairs_kernel(
             strategy=self.strategy,
-            positions=pos.cpu(),
-            batch=batch.cpu(),
+            positions=pos,
+            batch=batch,
             max_num_pairs=int(max_pairs),
             cutoff_lower=self.cutoff_lower,
             cutoff_upper=self.cutoff_upper,

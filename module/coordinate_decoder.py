@@ -98,7 +98,8 @@ class _DisplacementHead(nn.Module):
 
     def forward(self, h: Tensor, v: Tensor) -> Tensor:
         gate = torch.sigmoid(self.gate(h)).unsqueeze(2)
-        return self.out(v * gate).squeeze(-1)
+        # Coordinates remain an FP32 geometry island under BF16 autocast.
+        return self.out(v * gate).squeeze(-1).float()
 
 
 def _prepare_refiner_graph(
@@ -310,8 +311,8 @@ class JointMultiFrameDecoder(nn.Module):
             target_time_ps=target_time_ps,
             target_mask=target_mask,
         )
-        delta = self.displacement(decoded.h, decoded.v)
-        x_anchor = latent.x_anchor.to(device=delta.device, dtype=delta.dtype)
+        delta = self.displacement(decoded.h, decoded.v).float()
+        x_anchor = latent.x_anchor.to(device=delta.device, dtype=torch.float32)
         x_coarse = x_anchor.unsqueeze(0) + delta
         x_hat = x_coarse
         h_out, v_out = decoded.h, decoded.v
@@ -327,7 +328,7 @@ class JointMultiFrameDecoder(nn.Module):
             )
             if not isinstance(refined, (tuple, list)) or len(refined) < 3:
                 raise ValueError("spatial_refiner must return delta, scalar, and vector features")
-            x_hat = x_coarse + refined[0]
+            x_hat = x_coarse + refined[0].float()
             h_out, v_out = refined[1], refined[2]
 
         valid = decoded.frame_mask.index_select(0, state.abid).transpose(0, 1)

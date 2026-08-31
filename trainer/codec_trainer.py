@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import json
 import math
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -16,6 +18,7 @@ from module.coordinate_decoder import CodecLatent, JointMultiFrameDecoder, Laten
 from module.multiframe_codec import PVBFrameEncoder
 from module.temporal_codec import CausalTemporalEncoder
 
+from .codec_contract import json_safe, require_contract_equal
 from .codec_losses import (
     BucketNormalization,
     CodecLossWeights,
@@ -25,7 +28,33 @@ from .codec_losses import (
 
 
 CODEC_CONFIG_SCHEMA = "pvb.codec.config.v1"
-CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v1"
+CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v2"
+LEGACY_CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v1"
+CODEC_MODEL_CONTRACT_SCHEMA = "pvb.codec.model_contract.v1"
+CODEC_DISTANCE_REFERENCE_SCHEMA = "pvb.codec.distance_reference.v1"
+PVB_MODEL_CONFIG_KEYS = (
+    "hidden_channels",
+    "spatial_layers",
+    "temporal_layers",
+    "temporal_ratio",
+    "num_rbf",
+    "num_heads",
+    "cutoff_lower",
+    "cutoff_upper",
+    "max_num_neighbors",
+    "neighbor_backend",
+    "bond_construction",
+    "spatial_execution",
+    "use_spatial_refiner",
+    "time_scale_ps",
+    "topology_cache_capacity",
+    "topology_device_cache_capacity",
+    "distance_bond_min",
+    "distance_bond_max",
+    "distance_bond_max_num_neighbors",
+    "distance_bond_cache_capacity",
+    "spatial_dtype",
+)
 
 
 @dataclass(frozen=True)
@@ -112,6 +141,7 @@ class CodecTrainConfig:
     continuous_scale_ps: float = 100.0
     normalization_min_count: int = 32
     normalization_epsilon: float = 1e-6
+    precision: str = "fp32"
 
     def __post_init__(self) -> None:
         self.loss_schedule = tuple(
@@ -138,6 +168,9 @@ class CodecTrainConfig:
             raise ValueError("continuous_scale_ps must be finite and positive")
         if int(self.normalization_min_count) < 1 or float(self.normalization_epsilon) <= 0:
             raise ValueError("normalization guards must be positive")
+        self.precision = str(self.precision).lower()
+        if self.precision not in {"fp32", "bf16"}:
+            raise ValueError("precision must be 'fp32' or 'bf16'")
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "CodecTrainConfig":
@@ -174,6 +207,7 @@ class CodecTrainConfig:
             continuous_scale_ps=float(time_config["continuous_scale_ps"]),
             normalization_min_count=int(normalization.get("min_count", 32)),
             normalization_epsilon=float(normalization.get("epsilon", 1e-6)),
+            precision=str(training.get("precision", "fp32")).lower(),
         )
 
     def weights_at(self, step: int) -> CodecLossWeights:
@@ -210,6 +244,7 @@ class CodecTrainConfig:
                 "grad_clip": self.grad_clip,
                 "warmup_steps": int(self.warmup_steps),
                 "device": self.device,
+                "precision": self.precision,
                 "loss_schedule": [
                     {"start_step": start, "weights": weights.as_dict()}
                     for start, weights in self.loss_schedule
@@ -232,11 +267,53 @@ class PVBCodecModel(nn.Module):
         cutoff_lower: float = 0.0,
         cutoff_upper: float = 5.0,
         max_num_neighbors: int = 32,
-        neighbor_backend: str = "auto",
+        neighbor_backend: str = "cuda_radius",
+        bond_construction: Mapping[str, Any] | str | None = None,
         use_spatial_refiner: bool = False,
         time_scale_ps: float = 100.0,
+        topology_cache_capacity: int = 4096,
+        topology_device_cache_capacity: int = 4096,
+        distance_bond_min: float = 0.5,
+        distance_bond_max: float = 2.2,
+        distance_bond_max_num_neighbors: int = 64,
+        distance_bond_cache_capacity: int = 4096,
+        spatial_execution: Mapping[str, Any] | str | None = None,
+        spatial_dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
+        if not isinstance(spatial_dtype, torch.dtype):
+            raise TypeError("spatial_dtype must be a torch.dtype")
+        if spatial_execution is None:
+            spatial_execution_config: dict[str, Any] = {"mode": "full"}
+        elif isinstance(spatial_execution, str):
+            spatial_execution_config = {"mode": spatial_execution}
+        elif isinstance(spatial_execution, Mapping):
+            spatial_execution_config = dict(spatial_execution)
+        else:
+            raise TypeError("spatial_execution must be a mode string or mapping")
+        spatial_mode = str(spatial_execution_config.get("mode", "full"))
+        if spatial_mode != "full":
+            raise NotImplementedError(
+                "only spatial_execution.mode='full' is implemented in Phase A/B; "
+                "halo_subgraph is the optional Phase-C stretch"
+            )
+        if isinstance(bond_construction, str):
+            bond_config = {"mode": bond_construction}
+        elif isinstance(bond_construction, Mapping):
+            bond_config = dict(bond_construction)
+        elif bond_construction is None:
+            bond_config = {"mode": "topology"}
+        else:
+            raise TypeError("bond_construction must be a mode string or mapping")
+        distance_bond_min = float(
+            bond_config.get("min_distance_angstrom", distance_bond_min)
+        )
+        distance_bond_max = float(
+            bond_config.get("max_distance_angstrom", distance_bond_max)
+        )
+        distance_bond_max_num_neighbors = int(
+            bond_config.get("max_num_neighbors", distance_bond_max_num_neighbors)
+        )
         self.frame_encoder = PVBFrameEncoder(
             hidden_channels=hidden_channels,
             num_layers=spatial_layers,
@@ -246,6 +323,14 @@ class PVBCodecModel(nn.Module):
             cutoff_upper=cutoff_upper,
             max_num_neighbors=max_num_neighbors,
             neighbor_backend=neighbor_backend,
+            bond_construction=bond_config,
+            topology_cache_capacity=topology_cache_capacity,
+            topology_device_cache_capacity=topology_device_cache_capacity,
+            distance_bond_min=distance_bond_min,
+            distance_bond_max=distance_bond_max,
+            distance_bond_max_num_neighbors=distance_bond_max_num_neighbors,
+            distance_bond_cache_capacity=distance_bond_cache_capacity,
+            dtype=spatial_dtype,
         )
         self.temporal_encoder = CausalTemporalEncoder(
             hidden_channels,
@@ -276,9 +361,125 @@ class PVBCodecModel(nn.Module):
             time_scale_ps=time_scale_ps,
             spatial_refiner=refiner,
         )
+        self._constructor_config = json_safe(
+            {
+                "hidden_channels": int(hidden_channels),
+                "spatial_layers": int(spatial_layers),
+                "temporal_layers": int(temporal_layers),
+                "temporal_ratio": int(temporal_ratio),
+                "num_rbf": int(num_rbf),
+                "num_heads": int(num_heads),
+                "cutoff_lower": float(cutoff_lower),
+                "cutoff_upper": float(cutoff_upper),
+                "max_num_neighbors": int(max_num_neighbors),
+                "neighbor_backend": str(neighbor_backend),
+                "bond_construction": bond_config,
+                "use_spatial_refiner": bool(use_spatial_refiner),
+                "time_scale_ps": float(time_scale_ps),
+                "topology_cache_capacity": int(topology_cache_capacity),
+                "topology_device_cache_capacity": int(topology_device_cache_capacity),
+                "distance_bond_min": float(distance_bond_min),
+                "distance_bond_max": float(distance_bond_max),
+                "distance_bond_max_num_neighbors": int(distance_bond_max_num_neighbors),
+                "distance_bond_cache_capacity": int(distance_bond_cache_capacity),
+                "spatial_execution": spatial_execution_config,
+                "spatial_dtype": str(spatial_dtype).replace("torch.", ""),
+            }
+        )
+        self._distance_reference_contract: dict[str, Any] | None = None
 
-    def forward(self, batch: ClipBatch):
-        encoded = self.frame_encoder(batch)
+    def model_contract(self) -> dict[str, Any]:
+        """Return every constructor option that changes forward semantics."""
+
+        constructor = json_safe(self._constructor_config)
+        graph = {
+            "schema_version": "pvb.codec.graph_contract.v1",
+            "bond_construction": constructor["bond_construction"],
+            "neighbor_backend": constructor["neighbor_backend"],
+            "cutoff_lower": constructor["cutoff_lower"],
+            "cutoff_upper": constructor["cutoff_upper"],
+            "max_num_neighbors": constructor["max_num_neighbors"],
+            "distance_bond_min": constructor["distance_bond_min"],
+            "distance_bond_max": constructor["distance_bond_max"],
+            "distance_bond_max_num_neighbors": constructor["distance_bond_max_num_neighbors"],
+            "topology_cache_capacity": constructor["topology_cache_capacity"],
+            "topology_device_cache_capacity": constructor["topology_device_cache_capacity"],
+            "distance_bond_cache_capacity": constructor["distance_bond_cache_capacity"],
+            "spatial_execution": constructor["spatial_execution"],
+        }
+        return {
+            "schema_version": CODEC_MODEL_CONTRACT_SCHEMA,
+            "model_type": "trainer.codec_trainer.PVBCodecModel",
+            "constructor": constructor,
+            "architecture": {
+                "spatial": {
+                    "hidden_channels": constructor["hidden_channels"],
+                    "layers": constructor["spatial_layers"],
+                    "num_rbf": constructor["num_rbf"],
+                    "num_heads": constructor["num_heads"],
+                    "dtype": constructor["spatial_dtype"],
+                    "spatial_refiner": constructor["use_spatial_refiner"],
+                },
+                "temporal": {
+                    "hidden_channels": constructor["hidden_channels"],
+                    "layers": constructor["temporal_layers"],
+                    "ratio": constructor["temporal_ratio"],
+                    "num_heads": constructor["num_heads"],
+                    "time_scale_ps": constructor["time_scale_ps"],
+                },
+                "decoder": {
+                    "temporal_layers": constructor["temporal_layers"],
+                    "num_heads": constructor["num_heads"],
+                    "time_scale_ps": constructor["time_scale_ps"],
+                },
+            },
+            "graph": graph,
+        }
+
+    @classmethod
+    def from_model_contract(cls, contract: Mapping[str, Any]) -> "PVBCodecModel":
+        if str(contract.get("schema_version", "")) != CODEC_MODEL_CONTRACT_SCHEMA:
+            raise ValueError(
+                f"unsupported PVB model contract; expected {CODEC_MODEL_CONTRACT_SCHEMA!r}"
+            )
+        if str(contract.get("model_type", "")) != "trainer.codec_trainer.PVBCodecModel":
+            raise ValueError("checkpoint model contract is not for PVBCodecModel")
+        constructor = contract.get("constructor")
+        if not isinstance(constructor, Mapping):
+            raise ValueError("PVB model contract is missing its constructor mapping")
+        constructor = dict(constructor)
+        dtype_name = str(constructor.pop("spatial_dtype", "float32"))
+        try:
+            spatial_dtype = getattr(torch, dtype_name)
+        except AttributeError as exc:
+            raise ValueError(f"unsupported checkpoint spatial dtype {dtype_name!r}") from exc
+        if not isinstance(spatial_dtype, torch.dtype):
+            raise ValueError(f"checkpoint spatial dtype {dtype_name!r} is not a torch dtype")
+        constructor["spatial_dtype"] = spatial_dtype
+        model = cls(**constructor)
+        require_contract_equal(contract, model.model_contract(), label="model contract")
+        return model
+
+    def prepare_batch(self, batch: ClipBatch) -> None:
+        self.frame_encoder.prepare_batch(batch)
+
+    def prepare_distance_bonds(
+        self,
+        references: Mapping[str, Mapping[str, Any]],
+        *,
+        device: torch.device,
+    ) -> None:
+        manifest = self.frame_encoder.prepare_distance_bonds(references, device=device)
+        self._distance_reference_contract = {
+            "schema_version": CODEC_DISTANCE_REFERENCE_SCHEMA,
+            "policy": "canonical_reference",
+            "references": sorted(manifest, key=lambda item: str(item["topology_id"])),
+        }
+
+    def distance_reference_contract(self) -> dict[str, Any] | None:
+        return None if self._distance_reference_contract is None else json_safe(self._distance_reference_contract)
+
+    def _decode_encoded(self, encoded: Any, batch: ClipBatch):
         state = self.temporal_encoder(
             encoded.h,
             encoded.v,
@@ -305,19 +506,60 @@ class PVBCodecModel(nn.Module):
             target_mask=batch.frame_mask,
         )
 
+    def forward_with_encoded(self, batch: ClipBatch):
+        encoded = self.frame_encoder(batch)
+        return encoded, self._decode_encoded(encoded, batch)
 
-def _to_device(value: Any, device: torch.device) -> Any:
+    def forward(self, batch: ClipBatch):
+        return self._decode_encoded(self.frame_encoder(batch), batch)
+
+
+def _to_device(value: Any, device: torch.device, *, non_blocking: bool = False) -> Any:
+    if isinstance(value, ClipBatch):
+        return value.to(device, non_blocking=non_blocking)
     if isinstance(value, Tensor):
-        return value.to(device)
+        return value.to(device, non_blocking=non_blocking)
     if is_dataclass(value) and not isinstance(value, type):
-        return replace(value, **{field.name: _to_device(getattr(value, field.name), device) for field in fields(value)})
+        return replace(
+            value,
+            **{
+                field.name: _to_device(
+                    getattr(value, field.name),
+                    device,
+                    non_blocking=non_blocking,
+                )
+                for field in fields(value)
+            },
+        )
     if isinstance(value, Mapping):
-        return {key: _to_device(item, device) for key, item in value.items()}
+        return {
+            key: _to_device(item, device, non_blocking=non_blocking)
+            for key, item in value.items()
+        }
     if isinstance(value, tuple):
-        return tuple(_to_device(item, device) for item in value)
+        return tuple(
+            _to_device(item, device, non_blocking=non_blocking) for item in value
+        )
     if isinstance(value, list):
-        return [_to_device(item, device) for item in value]
+        return [
+            _to_device(item, device, non_blocking=non_blocking) for item in value
+        ]
     return value
+
+
+def prepare_batch_then_to_device(
+    model: nn.Module,
+    batch: Any,
+    device: torch.device,
+    *,
+    non_blocking: bool = False,
+) -> Any:
+    """Run the CPU-only registration phase before any CUDA transfer."""
+
+    prepare = getattr(model, "prepare_batch", None)
+    if callable(prepare):
+        prepare(batch)
+    return _to_device(batch, device, non_blocking=non_blocking)
 
 
 class CodecTrainer:
@@ -332,6 +574,7 @@ class CodecTrainer:
         *,
         device: str | torch.device | None = None,
         normalization_stats: Mapping[str, BucketNormalization | Mapping[str, Any]] | None = None,
+        non_blocking_transfer: bool = True,
     ) -> None:
         self.config = (
             config if isinstance(config, CodecTrainConfig)
@@ -339,9 +582,24 @@ class CodecTrainer:
             else CodecTrainConfig()
         )
         selected_device = device or self.config.device
-        if str(selected_device) == "auto":
-            selected_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if str(selected_device).lower() == "auto":
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "training.device='auto' requires CUDA; GPU is unavailable and "
+                    "the production trainer will not fall back to CPU"
+                )
+            selected_device = "cuda"
+        if str(selected_device).lower().startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"requested CUDA device {selected_device!r} is unavailable; "
+                "the production trainer will not fall back to CPU"
+            )
         self.device = torch.device(selected_device)
+        if self.config.precision == "bf16" and self.device.type != "cuda":
+            raise RuntimeError(
+                "BF16 codec training requires CUDA; refusing a CPU precision fallback"
+            )
+        self.non_blocking_transfer = bool(non_blocking_transfer)
         self.model = model.to(self.device)
         self.train_loader = train_loader
         self.valid_loader = valid_loader
@@ -353,6 +611,7 @@ class CodecTrainer:
             self.normalization_stats[str(key)] = value if isinstance(value, BucketNormalization) else BucketNormalization.from_dict(value)
         self.step = 0
         self.epoch = 0
+        self.batch_in_epoch = 0
         self._train_iterator: Optional[Iterable[Any]] = None
 
     def fit_normalization(self, batches: Optional[Iterable[Any]] = None) -> dict[str, BucketNormalization]:
@@ -368,22 +627,57 @@ class CodecTrainer:
         bucket_ids = tuple(str(item) for item in batch.time_bucket_id)
         if not bucket_ids:
             raise ValueError("codec batch must contain at least one time bucket")
+        delta_time = batch.delta_time_ps
+        frame_mask = batch.frame_mask
+        if isinstance(delta_time, Tensor) and delta_time.device.type != "cpu":
+            raise RuntimeError(
+                "batch clock validation must run on the CPU batch before transfer"
+            )
+        if isinstance(frame_mask, Tensor) and frame_mask.device.type != "cpu":
+            raise RuntimeError(
+                "batch frame-mask validation must run on the CPU batch before transfer"
+            )
+        frames = int(batch.frames) if hasattr(batch, "frames") else int(batch.x.shape[0])
         weights = []
         for sample_index, bucket_id in enumerate(bucket_ids):
             spec = self.config.bucket(bucket_id)
             weights.append(spec.weight)
-            if getattr(batch, "frames", int(batch.x.shape[0])) > 1:
-                valid_delta = batch.delta_time_ps[sample_index][batch.frame_mask[sample_index, 1:]]
-                if valid_delta.numel() and torch.any((valid_delta - spec.center_ps).abs() > spec.tolerance_ps):
+            if frames > 1:
+                valid_delta = delta_time[sample_index][frame_mask[sample_index, 1:]]
+                if valid_delta.numel() and torch.any(
+                    (valid_delta - spec.center_ps).abs() > spec.tolerance_ps
+                ):
                     raise ValueError(
                         f"batch delta_time_ps does not match bucket {bucket_id!r} center/tolerance"
                     )
         return float(sum(weights) / len(weights))
 
+    def _autocast_context(self):
+        if self.config.precision == "bf16":
+            if self.device.type != "cuda":
+                raise RuntimeError(
+                    "BF16 autocast requires CUDA; CPU fallback is not permitted"
+                )
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
+
+    def _prepare_batch(self, batch: Any) -> None:
+        prepare = getattr(self.model, "prepare_batch", None)
+        if callable(prepare):
+            prepare(batch)
+
     def _loss_for_batch(self, batch: Any) -> tuple[dict[str, Tensor], float, Any]:
-        batch = _to_device(batch, self.device)
+        # Validate immutable clock metadata while it is still on the CPU. This
+        # keeps the CUDA transfer/forward path free of Python CUDA scalar reads.
         bucket_weight = self._validate_batch_clock(batch)
-        output = self.model(batch)
+        batch = prepare_batch_then_to_device(
+            self.model,
+            batch,
+            self.device,
+            non_blocking=self.non_blocking_transfer,
+        )
+        with self._autocast_context():
+            output = self.model(batch)
         losses = compute_codec_losses(
             output,
             batch,
@@ -396,8 +690,17 @@ class CodecTrainer:
     @staticmethod
     def _metrics(losses: Mapping[str, Tensor], batch: Any) -> dict[str, float]:
         metrics = {key: float(value.detach().cpu()) for key, value in losses.items()}
-        task = torch.as_tensor(batch.task, dtype=torch.long).flatten()
-        for task_id in torch.unique(task).tolist():
+        host_task_ids = tuple(getattr(batch, "host_task_ids", ()))
+        if host_task_ids:
+            task_ids = tuple(sorted(set(int(value) for value in host_task_ids)))
+        else:
+            task = torch.as_tensor(batch.task, dtype=torch.long).flatten()
+            if task.device.type != "cpu":
+                raise RuntimeError(
+                    "CUDA metric task labels require host_task_ids from CPU collation"
+                )
+            task_ids = tuple(sorted(set(int(value) for value in task.tolist())))
+        for task_id in task_ids:
             task_name = TASK_NAMES[int(task_id)]
             metrics[f"task_{task_name}_total"] = metrics["total"]
         for bucket_id in dict.fromkeys(str(item) for item in batch.time_bucket_id):
@@ -410,6 +713,11 @@ class CodecTrainer:
 
     def optimizer_step(self, batch: Any) -> dict[str, float]:
         self.model.train()
+        next_step = self.step + 1
+        if self.config.warmup_steps:
+            scale = min(1.0, next_step / float(self.config.warmup_steps))
+            for group in self.optimizer.param_groups:
+                group["lr"] = self.config.lr * scale
         self.optimizer.zero_grad(set_to_none=True)
         losses, _, moved_batch = self._loss_for_batch(batch)
         total = losses["total"]
@@ -422,11 +730,7 @@ class CodecTrainer:
             if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                 raise FloatingPointError("codec gradient is NaN or Inf")
         self.optimizer.step()
-        self.step += 1
-        if self.config.warmup_steps:
-            scale = min(1.0, self.step / float(self.config.warmup_steps))
-            for group in self.optimizer.param_groups:
-                group["lr"] = self.config.lr * scale
+        self.step = next_step
         return self._metrics(losses, moved_batch)
 
     @torch.no_grad()
@@ -434,6 +738,23 @@ class CodecTrainer:
         self.model.eval()
         losses, _, moved_batch = self._loss_for_batch(batch)
         return self._metrics(losses, moved_batch)
+
+    def _batch_sampler(self):
+        return getattr(self.train_loader, "batch_sampler", None)
+
+    def _new_train_iterator(self) -> Iterable[Any]:
+        sampler = self._batch_sampler()
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(self.epoch)
+        iterator = iter(self.train_loader)
+        for _ in range(int(self.batch_in_epoch)):
+            try:
+                next(iterator)
+            except StopIteration as exc:
+                raise RuntimeError(
+                    "checkpoint batch_in_epoch exceeds the current epoch schedule"
+                ) from exc
+        return iterator
 
     def run(
         self,
@@ -443,33 +764,50 @@ class CodecTrainer:
         log_every: int = 1,
     ) -> dict[str, float]:
         """Optimize until max_steps and optionally append step metrics as JSONL."""
+
         target = int(max_steps if max_steps is not None else self.config.max_steps)
         if target < self.step:
             raise ValueError("max_steps cannot be less than the current checkpoint step")
         if int(log_every) < 1:
             raise ValueError("log_every must be positive")
+        if len(self.train_loader) < 1:
+            raise RuntimeError("training loader contains no batches")
         log_handle = None
         if log_path is not None:
             destination = Path(log_path)
             destination.parent.mkdir(parents=True, exist_ok=True)
             log_handle = destination.open("a", encoding="utf-8")
-        iterator = iter(self.train_loader)
+        if self._train_iterator is None:
+            self._train_iterator = self._new_train_iterator()
         last: dict[str, float] = {}
         try:
             while self.step < target:
+                if self._train_iterator is None:
+                    self._train_iterator = self._new_train_iterator()
                 try:
-                    batch = next(iterator)
+                    batch = next(self._train_iterator)
                 except StopIteration:
                     self.epoch += 1
-                    iterator = iter(self.train_loader)
-                    batch = next(iterator)
+                    self.batch_in_epoch = 0
+                    self._train_iterator = self._new_train_iterator()
+                    batch = next(self._train_iterator)
                 last = self.optimizer_step(batch)
-                if log_handle is not None and (self.step % int(log_every) == 0 or self.step == target):
+                self.batch_in_epoch += 1
+                finished_epoch = self.batch_in_epoch >= len(self.train_loader)
+                logged_epoch = self.epoch
+                if finished_epoch:
+                    self.epoch += 1
+                    self.batch_in_epoch = 0
+                    self._train_iterator = None
+                if log_handle is not None and (
+                    self.step % int(log_every) == 0 or self.step == target
+                ):
                     record = {
                         "schema_version": "pvb.codec.train.v1",
                         "split": "train",
                         "step": int(self.step),
-                        "epoch": int(self.epoch),
+                        "epoch": int(logged_epoch),
+                        "batch_in_epoch": int(self.batch_in_epoch),
                         "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                         "metrics": last,
                     }
@@ -480,11 +818,64 @@ class CodecTrainer:
                 log_handle.close()
         return last
 
+    def _model_contract(self) -> dict[str, Any]:
+        method = getattr(self.model, "model_contract", None)
+        if callable(method):
+            contract = method()
+            if not isinstance(contract, Mapping):
+                raise TypeError("model_contract() must return a mapping")
+            return json_safe(contract)
+        signature = []
+        for name, parameter in self.model.named_parameters():
+            signature.append(
+                {
+                    "name": name,
+                    "shape": list(parameter.shape),
+                    "dtype": str(parameter.dtype).replace("torch.", ""),
+                    "requires_grad": bool(parameter.requires_grad),
+                }
+            )
+        return {
+            "schema_version": CODEC_MODEL_CONTRACT_SCHEMA,
+            "model_type": f"{type(self.model).__module__}.{type(self.model).__qualname__}",
+            "generic_state_signature": signature,
+        }
+
+    def _distance_reference_contract(self) -> dict[str, Any] | None:
+        method = getattr(self.model, "distance_reference_contract", None)
+        if not callable(method):
+            return None
+        value = method()
+        return None if value is None else json_safe(value)
+
+    def _optimizer_contract(self) -> dict[str, Any]:
+        groups = self.optimizer.param_groups
+        return {
+            "algorithm": "AdamW",
+            "base_lr": float(self.config.lr),
+            "weight_decay": float(self.config.weight_decay),
+            "warmup_steps": int(self.config.warmup_steps),
+            "param_group_count": len(groups),
+            "param_group_sizes": [len(group["params"]) for group in groups],
+            "current_lrs": [float(group["lr"]) for group in groups],
+        }
+
     def checkpoint_state(self) -> dict[str, Any]:
         return {
             "schema_version": CODEC_CHECKPOINT_SCHEMA,
             "step": int(self.step),
             "epoch": int(self.epoch),
+            "batch_in_epoch": int(self.batch_in_epoch),
+            "precision": self.config.precision,
+            "sampler_state": (
+                self._batch_sampler().state_dict()
+                if self._batch_sampler() is not None
+                and hasattr(self._batch_sampler(), "state_dict")
+                else None
+            ),
+            "model_contract": self._model_contract(),
+            "distance_reference_contract": self._distance_reference_contract(),
+            "optimizer_contract": self._optimizer_contract(),
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "normalization_stats": {
@@ -499,32 +890,261 @@ class CodecTrainer:
         torch.save(self.checkpoint_state(), destination)
         return destination
 
-    def load_checkpoint(self, path: str | Path) -> None:
+    @staticmethod
+    def _config_for_resume(config: CodecTrainConfig) -> dict[str, Any]:
+        value = config.as_dict()
+        # Extending the target step count is the only training override that
+        # preserves the exact optimizer/loss/sampler contract.
+        value["training"] = dict(value["training"])
+        value["training"].pop("max_steps", None)
+        return value
+
+    @staticmethod
+    def _validate_state_mapping(model: nn.Module, state: Any) -> None:
+        if not isinstance(state, Mapping):
+            raise ValueError("checkpoint model_state must be a mapping")
+        expected = model.state_dict()
+        if set(state) != set(expected):
+            missing = sorted(set(expected).difference(state))
+            unexpected = sorted(set(state).difference(expected))
+            raise ValueError(
+                f"checkpoint model_state keys differ: missing={missing[:8]}, "
+                f"unexpected={unexpected[:8]}"
+            )
+        for name, value in state.items():
+            if not isinstance(value, Tensor):
+                raise ValueError(f"checkpoint model_state[{name!r}] is not a tensor")
+            target = expected[name]
+            if tuple(value.shape) != tuple(target.shape):
+                raise ValueError(
+                    f"checkpoint model_state[{name!r}] shape {tuple(value.shape)} "
+                    f"does not match {tuple(target.shape)}"
+                )
+            if value.dtype != target.dtype:
+                raise ValueError(
+                    f"checkpoint model_state[{name!r}] dtype {value.dtype} "
+                    f"does not match {target.dtype}"
+                )
+
+    def _validate_optimizer_state(
+        self,
+        state: Any,
+        saved_contract: Any,
+        saved_config: CodecTrainConfig,
+        *,
+        saved_step: int,
+        allow_legacy_contract: bool = False,
+    ) -> None:
+        if not isinstance(state, Mapping):
+            raise ValueError("checkpoint optimizer_state must be a mapping")
+        if saved_contract is None and allow_legacy_contract:
+            # v1 has no contract field. The explicit legacy path still uses
+            # the known AdamW schema and validates its serialized groups below;
+            # it never guesses a graph/model configuration.
+            legacy_groups = state.get("param_groups")
+            if not isinstance(legacy_groups, list):
+                raise ValueError("legacy checkpoint optimizer_state is missing param_groups")
+            saved_contract = {
+                "algorithm": "AdamW",
+                "base_lr": float(saved_config.lr),
+                "weight_decay": float(saved_config.weight_decay),
+                "warmup_steps": int(saved_config.warmup_steps),
+                "param_group_count": len(legacy_groups),
+                "param_group_sizes": [len(group.get("params", ())) for group in legacy_groups],
+                "current_lrs": [float(group.get("lr", float("nan"))) for group in legacy_groups],
+            }
+        if not isinstance(saved_contract, Mapping):
+            raise ValueError("checkpoint optimizer_contract must be a mapping")
+        if int(saved_step) < 0:
+            raise ValueError("checkpoint step must be non-negative")
+        expected_lr = float(saved_config.lr)
+        if int(saved_step) > 0 and int(saved_config.warmup_steps):
+            expected_lr *= min(1.0, int(saved_step) / float(saved_config.warmup_steps))
+        expected_contract = {
+            "algorithm": "AdamW",
+            "base_lr": float(saved_config.lr),
+            "weight_decay": float(saved_config.weight_decay),
+            "warmup_steps": int(saved_config.warmup_steps),
+            "param_group_count": len(self.optimizer.param_groups),
+            "param_group_sizes": [
+                len(group["params"]) for group in self.optimizer.param_groups
+            ],
+            "current_lrs": [expected_lr for _ in self.optimizer.param_groups],
+        }
+        require_contract_equal(
+            expected_contract,
+            saved_contract,
+            label="optimizer contract",
+        )
+        saved_groups = state.get("param_groups")
+        current_groups = self.optimizer.state_dict().get("param_groups")
+        if not isinstance(saved_groups, list) or not isinstance(current_groups, list):
+            raise ValueError("optimizer checkpoint is missing param_groups")
+        if len(saved_groups) != len(current_groups):
+            raise ValueError("optimizer param-group count differs from current model")
+        for index, (saved_group, current_group) in enumerate(zip(saved_groups, current_groups)):
+            if len(saved_group.get("params", ())) != len(current_group.get("params", ())):
+                raise ValueError(f"optimizer param-group {index} parameter count differs")
+            if "weight_decay" not in saved_group or not math.isclose(
+                float(saved_group["weight_decay"]), float(saved_config.weight_decay), rel_tol=0.0, abs_tol=0.0
+            ):
+                raise ValueError(f"optimizer param-group {index} weight_decay disagrees with config")
+            for key in ("betas", "eps", "amsgrad", "maximize", "foreach", "capturable", "differentiable", "fused"):
+                if key in saved_group and key in current_group and saved_group[key] != current_group[key]:
+                    raise ValueError(f"optimizer param-group {index} hyperparameter {key!r} differs")
+            if "lr" not in saved_group or not math.isfinite(float(saved_group["lr"])):
+                raise ValueError(f"optimizer param-group {index} has an invalid learning rate")
+
+    def load_checkpoint(
+        self,
+        path: str | Path,
+        *,
+        allow_legacy: bool = False,
+        legacy_bond_mode: str | None = None,
+    ) -> None:
         payload = torch.load(path, map_location=self.device, weights_only=False)
-        if not isinstance(payload, Mapping) or payload.get("schema_version") != CODEC_CHECKPOINT_SCHEMA:
+        if not isinstance(payload, Mapping):
+            raise ValueError("codec checkpoint must be a mapping")
+        schema = str(payload.get("schema_version", ""))
+        legacy = schema == LEGACY_CODEC_CHECKPOINT_SCHEMA
+        if schema != CODEC_CHECKPOINT_SCHEMA and not legacy:
             raise ValueError(
                 f"unsupported codec checkpoint schema; expected {CODEC_CHECKPOINT_SCHEMA!r}"
             )
-        required = {"step", "epoch", "model_state", "optimizer_state", "normalization_stats", "config"}
+        if legacy and not allow_legacy:
+            raise ValueError(
+                "legacy codec checkpoint v1 has no model/graph contract; pass "
+                "allow_legacy=True and an explicit legacy_bond_mode to load it"
+            )
+        required = {
+            "step",
+            "epoch",
+            "batch_in_epoch",
+            "precision",
+            "sampler_state",
+            "model_state",
+            "optimizer_state",
+            "normalization_stats",
+            "config",
+        }
+        if not legacy:
+            required.update({"model_contract", "distance_reference_contract", "optimizer_contract"})
         missing = required.difference(payload)
         if missing:
             raise ValueError(f"codec checkpoint is missing fields: {sorted(missing)}")
-        self.model.load_state_dict(payload["model_state"])
-        self.optimizer.load_state_dict(payload["optimizer_state"])
-        self.step = int(payload["step"])
-        self.epoch = int(payload["epoch"])
-        self.normalization_stats = {
+
+        if legacy and isinstance(self.model, PVBCodecModel):
+            if legacy_bond_mode not in {"topology", "distance_only"}:
+                raise ValueError(
+                    "loading codec checkpoint v1 requires explicit legacy_bond_mode="
+                    "'topology' or 'distance_only'"
+                )
+            actual_mode = self.model.frame_encoder.bond_construction_mode
+            if actual_mode != legacy_bond_mode:
+                raise ValueError(
+                    f"legacy checkpoint graph mode {legacy_bond_mode!r} conflicts with "
+                    f"current model mode {actual_mode!r}"
+                )
+        saved_config = CodecTrainConfig.from_mapping(payload["config"])
+        if int(self.config.max_steps) < int(saved_config.max_steps):
+            raise ValueError(
+                "resume max_steps cannot be shorter than checkpoint max_steps; "
+                "only an extension is allowed"
+            )
+        require_contract_equal(
+            self._config_for_resume(saved_config),
+            self._config_for_resume(self.config),
+            label="training config",
+        )
+        if str(payload["precision"]).lower() != saved_config.precision:
+            raise ValueError("checkpoint precision disagrees with checkpoint config")
+        if str(payload["precision"]).lower() != self.config.precision:
+            raise ValueError("codec checkpoint precision differs from current config")
+        if not legacy:
+            require_contract_equal(
+                payload["model_contract"],
+                self._model_contract(),
+                label="model contract",
+            )
+            require_contract_equal(
+                payload["distance_reference_contract"],
+                self._distance_reference_contract(),
+                label="distance reference contract",
+            )
+        try:
+            step = int(payload["step"])
+            epoch = int(payload["epoch"])
+            batch_in_epoch = int(payload["batch_in_epoch"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("checkpoint counters must be integers") from exc
+        if step < 0 or epoch < 0 or batch_in_epoch < 0:
+            raise ValueError("checkpoint counters must be non-negative")
+        self._validate_state_mapping(self.model, payload["model_state"])
+        self._validate_optimizer_state(
+            payload["optimizer_state"],
+            payload.get("optimizer_contract"),
+            saved_config,
+            saved_step=step,
+            allow_legacy_contract=legacy,
+        )
+        if batch_in_epoch >= len(self.train_loader):
+            raise ValueError("checkpoint batch_in_epoch must be smaller than current loader length")
+        if not isinstance(payload["normalization_stats"], Mapping):
+            raise ValueError("checkpoint normalization_stats must be a mapping")
+        new_normalization = {
             str(key): BucketNormalization.from_dict(value)
             for key, value in payload["normalization_stats"].items()
         }
+        sampler = self._batch_sampler()
+        saved_sampler = payload["sampler_state"]
+        if saved_sampler is not None:
+            if sampler is None or not hasattr(sampler, "load_state_dict"):
+                raise ValueError("checkpoint contains sampler state but loader cannot restore it")
+            validator = getattr(sampler, "validate_state_dict", None)
+            if callable(validator):
+                validator(saved_sampler)
+
+        # All preflight checks above run before mutation. The rollback snapshot
+        # also protects against a third-party load_state_dict implementation
+        # failing after partially copying tensors.
+        model_snapshot = copy.deepcopy(self.model.state_dict())
+        optimizer_snapshot = copy.deepcopy(self.optimizer.state_dict())
+        sampler_snapshot = copy.deepcopy(sampler.state_dict()) if sampler is not None and hasattr(sampler, "state_dict") else None
+        old_step, old_epoch, old_batch = self.step, self.epoch, self.batch_in_epoch
+        old_normalization = copy.deepcopy(self.normalization_stats)
+        old_iterator = self._train_iterator
+        try:
+            self.model.load_state_dict(payload["model_state"], strict=True)
+            self.optimizer.load_state_dict(payload["optimizer_state"])
+            self.step = step
+            self.epoch = epoch
+            self.batch_in_epoch = batch_in_epoch
+            if saved_sampler is not None:
+                sampler.load_state_dict(saved_sampler)
+            self.normalization_stats = new_normalization
+            self._train_iterator = None
+        except Exception:
+            self.model.load_state_dict(model_snapshot, strict=True)
+            self.optimizer.load_state_dict(optimizer_snapshot)
+            self.step, self.epoch, self.batch_in_epoch = old_step, old_epoch, old_batch
+            if sampler is not None and sampler_snapshot is not None:
+                sampler.load_state_dict(sampler_snapshot)
+            self.normalization_stats = old_normalization
+            self._train_iterator = old_iterator
+            raise
 
 
 __all__ = [
     "CODEC_CHECKPOINT_SCHEMA",
     "CODEC_CONFIG_SCHEMA",
+    "CODEC_DISTANCE_REFERENCE_SCHEMA",
+    "CODEC_MODEL_CONTRACT_SCHEMA",
+    "LEGACY_CODEC_CHECKPOINT_SCHEMA",
+    "PVB_MODEL_CONFIG_KEYS",
     "CodecTrainConfig",
     "CodecTrainer",
     "PVBCodecModel",
     "TimeBucketSpec",
+    "prepare_batch_then_to_device",
     "validate_codec_config",
 ]

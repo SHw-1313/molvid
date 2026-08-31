@@ -422,10 +422,17 @@ def compute_codec_losses(
         coordinates = prediction.x_hat
     else:
         raise TypeError("prediction must be a [T,N,3] tensor or expose x_hat")
+    # Geometry and all reductions are evaluated in FP32 even when the model
+    # forward is enclosed by BF16 autocast.
+    coordinates = coordinates.float()
     if target is None:
-        target = torch.as_tensor(_field(batch, "x"), device=coordinates.device, dtype=coordinates.dtype)
+        target = torch.as_tensor(
+            _field(batch, "x"), device=coordinates.device, dtype=torch.float32
+        )
     else:
-        target = torch.as_tensor(target, device=coordinates.device, dtype=coordinates.dtype)
+        target = torch.as_tensor(
+            target, device=coordinates.device, dtype=torch.float32
+        )
     _check_coordinates(coordinates, target)
     selected = weights if isinstance(weights, CodecLossWeights) else CodecLossWeights.from_mapping(weights)
     norm = _normalization_for(normalization, batch)

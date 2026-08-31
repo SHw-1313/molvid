@@ -26,6 +26,7 @@ time:
 
 training:
   device: auto
+  precision: fp32
   lr: 1.0e-4
   weight_decay: 1.0e-6
   max_steps: 1000
@@ -64,9 +65,13 @@ model:
   cutoff_lower: 0.0
   cutoff_upper: 5.0
   max_num_neighbors: 32
-  neighbor_backend: auto
+  neighbor_backend: cuda_radius
   use_spatial_refiner: false
   time_scale_ps: 100.0
+  bond_construction:
+    mode: topology
+  spatial_execution:
+    mode: full
 
 data:
   train_roots: []

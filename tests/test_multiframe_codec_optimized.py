@@ -6,7 +6,7 @@ from data.clip_dataset import collate_clip_records
 from module.multiframe_codec import PVBFrameEncoder
 
 
-def test_default_optimized_neighbor_backend_keeps_frame_graphs_isolated():
+def test_explicit_test_neighbor_backend_keeps_frame_graphs_isolated():
     atoms = 5
     frames = 2
     coordinates = torch.randn(frames, atoms, 3)
@@ -37,7 +37,9 @@ def test_default_optimized_neighbor_backend_keeps_frame_graphs_isolated():
         num_rbf=4,
         num_heads=2,
         max_num_neighbors=4,
+        neighbor_backend="dense_test",
     )
+    encoder.prepare_batch(batch)
     output = encoder(batch)
     graph = output.graph
     assert output.h.shape == (frames, atoms, 8)

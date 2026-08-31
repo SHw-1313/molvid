@@ -13,7 +13,7 @@ import io
 import json
 import mmap
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -42,6 +42,27 @@ NPZ_ARRAY_KEYS = (
 STATIC_TASK = 0
 TRAJECTORY_TASK = 1
 TASK_NAMES = {STATIC_TASK: "static", TRAJECTORY_TASK: "trajectory"}
+
+
+def stable_topology_id(record: Mapping[str, Any], *, require_stable: bool = False) -> str:
+    """Derive the stable graph-topology identifier stored in a clip batch."""
+
+    explicit = record.get("topology_id")
+    if explicit not in (None, ""):
+        return str(explicit)
+    system = record.get("system_id")
+    fingerprint = record.get("topology_fingerprint")
+    if system not in (None, "") and fingerprint not in (None, ""):
+        return f"{system}::{fingerprint}"
+    if system not in (None, ""):
+        return str(system)
+    if fingerprint not in (None, ""):
+        return str(fingerprint)
+    if require_stable:
+        raise ClipValidationError(
+            "a stable topology_id/system_id/topology_fingerprint is required"
+        )
+    return str(record.get("sample_id", ""))
 
 
 class ClipValidationError(ValueError):
@@ -339,12 +360,55 @@ class ClipBatch:
     time_ps: torch.Tensor  # [B, T]
     delta_time_ps: torch.Tensor  # [B, T-1]
     time_bucket_id: tuple[str, ...]
+    topology_id: tuple[str, ...]
     task: torch.Tensor  # [B]
     sample_id: tuple[str, ...]
+    # Immutable host metadata populated by collate. It is deliberately a
+    # tuple so ClipBatch.to(cuda) never has to read atom_ptr back from the
+    # device in the graph hot path.
+    atom_counts: tuple[int, ...] = ()
+    atom_identity_sha256: tuple[str, ...] = ()
+    host_task_ids: tuple[int, ...] = ()
 
     @property
     def batch_size(self) -> int:
         return int(self.atom_ptr.numel() - 1)
+
+    @property
+    def host_atom_counts(self) -> tuple[int, ...]:
+        """Return prevalidated per-sample atom counts without CUDA sync."""
+
+        if self.atom_counts:
+            if len(self.atom_counts) != self.batch_size:
+                raise ClipValidationError("atom_counts must match atom_ptr batch size")
+            return tuple(int(value) for value in self.atom_counts)
+        if self.atom_ptr.device.type != "cpu":
+            raise RuntimeError(
+                "CUDA ClipBatch is missing host atom_counts; collate the CPU batch "
+                "before transfer"
+            )
+        values = tuple(
+            int(self.atom_ptr[index + 1] - self.atom_ptr[index])
+            for index in range(self.batch_size)
+        )
+        return values
+
+    @property
+    def host_atom_identity_hashes(self) -> tuple[str, ...]:
+        """Return immutable per-sample atom-identity hashes from CPU collation."""
+
+        if self.atom_identity_sha256:
+            if len(self.atom_identity_sha256) != self.batch_size:
+                raise ClipValidationError(
+                    "atom_identity_sha256 must match atom_ptr batch size"
+                )
+            return tuple(str(value) for value in self.atom_identity_sha256)
+        if self.atom_ptr.device.type != "cpu":
+            raise RuntimeError(
+                "CUDA ClipBatch is missing host atom_identity_sha256; "
+                "collate the CPU batch before transfer"
+            )
+        return ()
 
     @property
     def frames(self) -> int:
@@ -354,16 +418,56 @@ class ClipBatch:
     def atom_count(self) -> int:
         return int(self.x.shape[1])
 
+    def pin_memory(self) -> "ClipBatch":
+        """Pin every tensor field for a non-blocking CUDA transfer."""
+
+        return replace(
+            self,
+            **{
+                field.name: getattr(self, field.name).pin_memory()
+                if isinstance(getattr(self, field.name), torch.Tensor)
+                else getattr(self, field.name)
+                for field in fields(self)
+            },
+        )
+
+    def to(
+        self,
+        device: torch.device | str,
+        *,
+        non_blocking: bool = False,
+    ) -> "ClipBatch":
+        """Move tensor fields while preserving typed clip metadata."""
+
+        return replace(
+            self,
+            **{
+                field.name: getattr(self, field.name).to(
+                    device=device, non_blocking=non_blocking
+                )
+                if isinstance(getattr(self, field.name), torch.Tensor)
+                else getattr(self, field.name)
+                for field in fields(self)
+            },
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
 
 
-def collate_clip_records(records: Sequence[Mapping[str, Any]]) -> ClipBatch:
+def collate_clip_records(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    validate: bool = True,
+) -> ClipBatch:
     """Pack variable-atom records into the canonical ``[T, N_total, 3]`` form."""
 
     if not records:
         raise ClipValidationError("cannot collate an empty clip batch")
-    normalized = [validate_clip_record(record) for record in records]
+    normalized = [
+        validate_clip_record(record) if validate else dict(record)
+        for record in records
+    ]
     first = normalized[0]
     task = int(first["task"])
     frames = int(first["x"].shape[0])
@@ -397,6 +501,8 @@ def collate_clip_records(records: Sequence[Mapping[str, Any]]) -> ClipBatch:
     times: list[np.ndarray] = []
     deltas: list[np.ndarray] = []
     sample_ids: list[str] = []
+    topology_ids: list[str] = []
+    identity_hashes: list[str] = []
     buckets: list[str] = []
     tasks: list[int] = []
 
@@ -415,6 +521,12 @@ def collate_clip_records(records: Sequence[Mapping[str, Any]]) -> ClipBatch:
         times.append(item["time_ps"])
         deltas.append(item["delta_time_ps"])
         sample_ids.append(str(item.get("sample_id", sample_idx)))
+        topology_ids.append(stable_topology_id(item))
+        identity_payload = json.dumps(
+            [str(value) for value in item["atom_identity"]],
+            separators=(",", ":"),
+        ).encode()
+        identity_hashes.append(hashlib.sha256(identity_payload).hexdigest())
         buckets.append(str(item["time_bucket_id"]))
         tasks.append(int(item["task"]))
 
@@ -445,8 +557,12 @@ def collate_clip_records(records: Sequence[Mapping[str, Any]]) -> ClipBatch:
         time_ps=torch.from_numpy(np.stack(times, axis=0)),
         delta_time_ps=torch.from_numpy(np.stack(deltas, axis=0)),
         time_bucket_id=tuple(buckets),
+        topology_id=tuple(topology_ids),
         task=torch.tensor(tasks, dtype=torch.long),
         sample_id=tuple(sample_ids),
+        atom_counts=tuple(int(value) for value in np.diff(np.asarray(atom_ptr))),
+        atom_identity_sha256=tuple(identity_hashes),
+        host_task_ids=tuple(tasks),
     )
 
 
@@ -559,6 +675,8 @@ class ClipMMapDataset(torch.utils.data.Dataset):
         self.root = Path(root)
         self._index: list[tuple[str, int, int]] = []
         self._clip_index_fields: list[tuple[str, int, int, int, int, str] | None] = []
+        self._data_file = None
+        self._mmap = None
         with (self.root / "index.txt").open(encoding="utf-8") as handle:
             for line in handle:
                 fields = line.rstrip("\n").split("\t")
@@ -583,13 +701,51 @@ class ClipMMapDataset(torch.utils.data.Dataset):
                         self._clip_index_fields.append(None)
                 else:
                     self._clip_index_fields.append(None)
+        self._validate_store_metadata()
+        self._open_handles()
+
+    def _validate_store_metadata(self) -> None:
+        data_path = self.root / "data.bin"
+        if not data_path.is_file():
+            raise ClipValidationError(f"clip store is missing data.bin: {data_path}")
+        stats_path = self.root / "stats.json"
+        if stats_path.is_file():
+            try:
+                stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ClipValidationError(f"invalid clip store stats: {stats_path}") from exc
+            if stats.get("storage_format") != STORAGE_FORMAT:
+                raise ClipValidationError(
+                    f"unsupported clip storage format: {stats.get('storage_format')!r}"
+                )
+            if int(stats.get("count", -1)) != len(self._index):
+                raise ClipValidationError("clip store stats count disagrees with index")
+            if "compressed_bytes" in stats and int(
+                stats["compressed_bytes"]
+            ) != int(data_path.stat().st_size):
+                raise ClipValidationError("clip store stats byte count disagrees with data.bin")
+
+    def _open_handles(self) -> None:
+        if self._mmap is not None:
+            return
         self._data_file = (self.root / "data.bin").open("rb")
         self._mmap = mmap.mmap(self._data_file.fileno(), 0, access=mmap.ACCESS_READ)
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["_data_file"] = None
+        state["_mmap"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._open_handles()
 
     def __len__(self) -> int:
         return len(self._index)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        self._open_handles()
         sample_id, start, end = self._index[index]
         payload = self._mmap[start:end]
         if payload[:2] != b"PK":
@@ -607,8 +763,10 @@ class ClipMMapDataset(torch.utils.data.Dataset):
     def close(self) -> None:
         if getattr(self, "_mmap", None) is not None:
             self._mmap.close()
-            self._data_file.close()
+            if self._data_file is not None:
+                self._data_file.close()
             self._mmap = None
+            self._data_file = None
 
     def __del__(self) -> None:
         try:

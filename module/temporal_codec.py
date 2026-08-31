@@ -162,8 +162,11 @@ class SO3ChannelNorm(nn.Module):
         self.scale = nn.Parameter(torch.ones(channels))
 
     def forward(self, v: Tensor) -> Tensor:
-        denom = v.square().mean(dim=2, keepdim=True).add(self.eps).sqrt()
-        return v / denom * self.scale.view(1, 1, 1, -1)
+        # Vector norms are accumulated in FP32; the surrounding projections may
+        # still execute under BF16 autocast.
+        v_fp32 = v.float()
+        denom = v_fp32.square().mean(dim=2, keepdim=True).add(self.eps).sqrt()
+        return v_fp32 / denom * self.scale.float().view(1, 1, 1, -1)
 
 
 class ScalarVectorFFN(nn.Module):
@@ -178,7 +181,7 @@ class ScalarVectorFFN(nn.Module):
         self.vector_gate = nn.Linear(hidden_channels, hidden_channels)
 
     def forward(self, h: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
-        v_norm = v.square().sum(dim=2).add(1e-6).sqrt()
+        v_norm = v.float().square().sum(dim=2).add(1e-6).sqrt()
         scalar_hidden = F.silu(self.scalar_in(torch.cat([h, v_norm], dim=-1)))
         h_out = self.scalar_out(scalar_hidden)
         v_hidden = self.vector_in(v)

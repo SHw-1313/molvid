@@ -329,15 +329,17 @@ def main() -> int:
     logs = _parse_train_logs(args.train_log, args.eval_json)
     if logs:
         plot_loss_curves(logs, args.output_dir, smooth_window=args.smooth_window)
+    split = str(payload.get("evaluation_data", {}).get("source_split", "valid"))
+    split_label = {"train": "Train", "valid": "Validation", "validation": "Validation"}.get(split, split)
     rows = _evaluation_rows(payload)
     _write_csv(rows, args.output_dir)
     _plot_metric_grid(
         rows,
         args.output_dir,
         stem="eval_loss",
-        title="Validation loss by native time bucket",
+        title=f"{split_label} loss by native time bucket",
         specs=(
-            ("validation_total_loss", "Validation total loss", False),
+            ("validation_total_loss", f"{split_label} total loss", False),
             ("validation_coordinate_loss", "Coordinate loss", False),
             ("validation_local_loss", "Local loss", False),
             ("validation_bond_loss", "Bond loss", False),

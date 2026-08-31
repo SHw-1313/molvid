@@ -447,9 +447,11 @@ def evaluate_controls(
 
 
 def report_markdown(report: Mapping[str, Any]) -> str:
-    lines = ["# PVB codec round-trip evaluation", "", "Metrics are stratified by native time bucket; no cross-bucket mean is reported.", ""]
+    split = str(report.get("evaluation_data", {}).get("source_split", "valid"))
+    split_label = {"train": "Train", "valid": "Validation", "validation": "Validation"}.get(split, split)
+    lines = [f"# PVB codec round-trip evaluation ({split_label} split)", "", "Metrics are stratified by native time bucket; no cross-bucket mean is reported.", ""]
     for name, control in report.get("controls", {}).items():
-        lines.extend([f"## {name}", "", "| Bucket | Δt (ps) | Span (ps) | Latent interval (ps) | Validation total loss | Frame-0 RMSD | Future RMSD | Future dRMSD | Velocity RMSE | Acceleration RMSE |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
+        lines.extend([f"## {name}", "", f"| Bucket | Δt (ps) | Span (ps) | Latent interval (ps) | {split_label} total loss | Frame-0 RMSD | Future RMSD | Future dRMSD | Velocity RMSE | Acceleration RMSE |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
         for bucket, values in control.get("by_time_bucket", {}).items():
             metrics = values["metrics"]
             loss = values.get("loss", {})

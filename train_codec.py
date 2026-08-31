@@ -23,7 +23,13 @@ from torch.utils.data import ConcatDataset, Subset
 
 from data.clip_batching import make_clip_dataloader
 from data.clip_dataset import ClipMMapDataset, collate_clip_records
-from trainer.codec_trainer import CodecTrainConfig, CodecTrainer, PVBCodecModel
+from module.bond_sources import build_canonical_reference_index
+from trainer.codec_trainer import (
+    PVB_MODEL_CONFIG_KEYS,
+    CodecTrainConfig,
+    CodecTrainer,
+    PVBCodecModel,
+)
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -58,15 +64,26 @@ def _fractional_subset(dataset: Any, fraction: float | None, seed: int) -> tuple
 
 
 def _loader(dataset: Any, data_config: dict[str, Any], *, training: bool) -> Any:
+    acceptance = data_config.get("acceptance_sampling", {})
+    if not isinstance(acceptance, dict):
+        raise ValueError("data.acceptance_sampling must be a mapping")
+    replacement = bool(
+        acceptance.get("replacement", training)
+    ) if training else False
     return make_clip_dataloader(
         dataset,
         max_tokens=int(data_config["max_tokens"]),
         collate_fn=collate_clip_records,
         num_workers=int(data_config.get("num_workers", 0)),
         pin_memory=bool(data_config.get("pin_memory", False)),
+        persistent_workers=bool(data_config.get("persistent_workers", False)),
+        prefetch_factor=int(data_config.get("prefetch_factor", 2)),
+        trusted_store_fast_path=bool(data_config.get("trusted_store_fast_path", False)),
+        strict_record_validation=bool(data_config.get("strict_record_validation", True)),
+        oversize_policy=str(data_config.get("oversize_policy", "error")),
         seed=int(data_config.get("seed", 0)) + (0 if training else 1),
         shuffle=bool(training),
-        replacement=bool(training),
+        replacement=replacement,
     )
 
 
@@ -75,6 +92,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=Path("config/codec.yaml"))
     parser.add_argument("--device", default=None, help="override training.device")
     parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--allow-legacy-checkpoint", action="store_true")
+    parser.add_argument("--legacy-bond-mode", choices=("topology", "distance_only"), default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None, help="run this many complete train-loader epochs")
     parser.add_argument("--subset-fraction", type=float, default=None, help="deterministically train/evaluate on this fraction of each dataset")
@@ -115,6 +134,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     torch.manual_seed(data_seed)
     if args.max_steps is not None and args.max_epochs is not None:
         raise ValueError("--max-steps and --max-epochs are mutually exclusive")
+    if args.resume is not None and args.fit_normalization:
+        raise ValueError(
+            "--fit-normalization cannot be combined with --resume; "
+            "normalization statistics are part of the checkpoint contract"
+        )
     if args.max_epochs is not None and int(args.max_epochs) < 1:
         raise ValueError("--max-epochs must be positive")
     data_config = raw.get("data", {})
@@ -152,16 +176,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_config = raw.get("model", {})
     if not isinstance(model_config, dict):
         raise ValueError("model config must be a mapping")
-    model = PVBCodecModel(
-        **{key: value for key, value in model_config.items() if key in {
-            "hidden_channels", "spatial_layers", "temporal_layers", "temporal_ratio",
-            "num_rbf", "num_heads", "cutoff_lower", "cutoff_upper",
-            "max_num_neighbors", "neighbor_backend", "use_spatial_refiner", "time_scale_ps",
-        }}
+    model_kwargs = {
+        key: model_config[key] for key in PVB_MODEL_CONFIG_KEYS if key in model_config
+    }
+    if "spatial_dtype" in model_kwargs:
+        dtype_name = str(model_kwargs["spatial_dtype"]).removeprefix("torch.")
+        try:
+            model_kwargs["spatial_dtype"] = getattr(torch, dtype_name)
+        except AttributeError as exc:
+            raise ValueError(f"unsupported model.spatial_dtype {dtype_name!r}") from exc
+        if not isinstance(model_kwargs["spatial_dtype"], torch.dtype):
+            raise ValueError(f"model.spatial_dtype {dtype_name!r} is not a torch dtype")
+    model = PVBCodecModel(**model_kwargs)
+    trainer = CodecTrainer(
+        model,
+        train_loader,
+        valid_loader,
+        train_config,
+        non_blocking_transfer=bool(data_config.get("non_blocking_transfer", True)),
     )
-    trainer = CodecTrainer(model, train_loader, valid_loader, train_config)
+    model_bond_mode = model.frame_encoder.bond_construction_mode
+    if model_bond_mode == "distance_only":
+        # The frozen distance graph is a train-split artifact. Validation is
+        # intentionally never part of canonical selection or cache setup.
+        references = build_canonical_reference_index(
+            train_dataset,
+            source_split="train",
+        )
+        trainer.model.prepare_distance_bonds(references, device=trainer.device)
+    elif model_bond_mode != "topology":
+        raise ValueError(f"unsupported bond construction mode: {model_bond_mode!r}")
+    eligibility = train_loader.batch_sampler.eligibility_report()
+    distance_reference_contract = trainer.model.distance_reference_contract()
+    protocol = dict(eligibility)
+    if distance_reference_contract is not None:
+        protocol["distance_reference_contract"] = distance_reference_contract
+    print(json.dumps({"train_eligibility": protocol}, sort_keys=True))
     if args.resume is not None:
-        trainer.load_checkpoint(args.resume)
+        trainer.load_checkpoint(
+            args.resume,
+            allow_legacy=args.allow_legacy_checkpoint,
+            legacy_bond_mode=args.legacy_bond_mode,
+        )
     normalization_elapsed_s = 0.0
     if args.fit_normalization:
         normalization_started = time.perf_counter()
@@ -182,6 +238,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(trainer.evaluate_batch(batch), sort_keys=True))
         return 0
     save_dir = Path(raw.get("training", {}).get("save_dir", "ckpt/codec"))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    (save_dir / "eligibility.json").write_text(
+        json.dumps(protocol, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     log_path = args.log_path if args.log_path is not None else save_dir / "train_metrics.jsonl"
     training_started = time.perf_counter()
     metrics = trainer.run(

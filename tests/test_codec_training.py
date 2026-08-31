@@ -188,7 +188,7 @@ def test_pvb_codec_model_cpu_one_step():
         num_rbf=4,
         num_heads=2,
         max_num_neighbors=4,
-        neighbor_backend="dense",
+        neighbor_backend="dense_test",
     )
     config = CodecTrainConfig(
         lr=1e-3,

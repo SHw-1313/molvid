@@ -47,7 +47,8 @@ def test_frame_graph_isolation_and_single_backbone_call():
     records = [_record("a", frames=4), _record("b", frames=4)]
     batch = collate_clip_records(records)
     fake = _FakeSpatial()
-    encoder = PVBFrameEncoder(spatial_encoder=fake, neighbor_backend="dense", max_num_neighbors=4)
+    encoder = PVBFrameEncoder(spatial_encoder=fake, neighbor_backend="dense_test", max_num_neighbors=4)
+    encoder.prepare_batch(batch)
     output = encoder(batch)
     graph = output.graph
     assert fake.calls == 1

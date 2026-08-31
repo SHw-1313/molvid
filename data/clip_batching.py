@@ -13,7 +13,10 @@ iterate over the same logical batch.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from functools import partial
 import math
 import re
 from collections import OrderedDict
@@ -476,6 +479,7 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
         shuffle: bool = True,
         replacement: bool = True,
         drop_last: bool = False,
+        oversize_policy: str = "error",
     ) -> None:
         if max_tokens is None:
             max_tokens = ubound_per_batch
@@ -517,20 +521,38 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
         self.shuffle = bool(shuffle)
         self.replacement = bool(replacement)
         self.drop_last = bool(drop_last)
+        self.oversize_policy = str(oversize_policy)
+        if self.oversize_policy not in {"error", "partition"}:
+            raise ValueError("oversize_policy must be 'error' or 'partition'")
         self._batches_per_epoch_explicit = batches_per_epoch is not None
         self.epoch = 0
         self._global_cache: tuple[int, list[list[int]]] | None = None
         self._validate_weights()
-        self._valid_positions = np.asarray(
+        all_positions = np.arange(len(self.specs), dtype=np.int64)
+        self._oversize_positions = np.asarray(
             [
-                position
-                for position in range(len(self.specs))
-                if self.specs[position].effective_tokens <= self.max_tokens
+                int(position)
+                for position in all_positions.tolist()
+                if self.specs[position].effective_tokens > self.max_tokens
             ],
             dtype=np.int64,
         )
+        if self.oversize_policy == "error" and self._oversize_positions.size:
+            details = [
+                {
+                    "index": int(position),
+                    "sample_id": self.specs[int(position)].sample_id,
+                    "effective_tokens": self.specs[int(position)].effective_tokens,
+                }
+                for position in self._oversize_positions[:32].tolist()
+            ]
+            raise ValueError(
+                f"{self._oversize_positions.size} clips exceed max_tokens={self.max_tokens}; "
+                f"oversize_policy='error' requires an explicit larger budget or partition mode: {details}"
+            )
+        self._valid_positions = all_positions
         if self._valid_positions.size == 0:
-            raise ValueError("no clip fits max_tokens")
+            raise ValueError("dataset contains no clips")
         self._groups = self._build_groups()
         self._group_weights = self._build_group_weights()
         self._batches_per_epoch = (
@@ -620,6 +642,13 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
                 cost = 0
                 for position in positions.tolist():
                     item_cost = int(self.specs[position].effective_tokens)
+                    if item_cost > self.max_tokens:
+                        if batch:
+                            result.append(batch)
+                            batch = []
+                            cost = 0
+                        result.append([int(self.specs[position].index)])
+                        continue
                     if batch and cost + item_cost > self.max_tokens:
                         result.append(batch)
                         batch = []
@@ -628,8 +657,14 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
                     cost += item_cost
                 if batch:
                     result.append(batch)
-            if self._batches_per_epoch_explicit:
-                return result[: self._batches_per_epoch]
+            if self._batches_per_epoch_explicit and self._batches_per_epoch < len(result):
+                # A no-replacement epoch must not silently discard records.
+                # A larger requested batch budget is harmless; a smaller one
+                # is an explicit configuration error.
+                raise ValueError(
+                    "batches_per_epoch is smaller than the exact no-replacement "
+                    f"schedule ({self._batches_per_epoch} < {len(result)})"
+                )
             return result
 
         orders: dict[tuple[int, int, str], np.ndarray] = {}
@@ -669,6 +704,16 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
                 if position in seen_in_batch:
                     break
                 item_cost = int(self.specs[position].effective_tokens)
+                if item_cost > self.max_tokens:
+                    if batch:
+                        # The cursor has advanced. Put it back so this
+                        # oversize sample is emitted alone next.
+                        cursors[key] -= 1
+                        break
+                    batch.append(int(self.specs[position].index))
+                    seen_in_batch.add(position)
+                    cost = item_cost
+                    break
                 if cost + item_cost > self.max_tokens:
                     # The cursor has advanced.  Put this item back so the
                     # next batch can use it, preserving no-replacement order.
@@ -720,6 +765,106 @@ class TaskAwareClipBatchSampler(Sampler[list[int]]):
     def __len__(self) -> int:
         return len(self._local_batches())
 
+    def eligibility_report(self) -> dict[str, Any]:
+        oversize = [
+            {
+                "index": int(position),
+                "sample_id": self.specs[int(position)].sample_id,
+                "effective_tokens": int(self.specs[int(position)].effective_tokens),
+            }
+            for position in self._oversize_positions.tolist()
+        ]
+        return {
+            "max_tokens": int(self.max_tokens),
+            "oversize_policy": self.oversize_policy,
+            "total_clips": int(len(self.specs)),
+            "in_budget_clips": int(len(self.specs) - self._oversize_positions.size),
+            "scheduled_clips": int(len(self.specs)),
+            "oversize_clips": int(self._oversize_positions.size),
+            "oversize": oversize,
+            "batches_per_epoch": int(len(self)),
+            "replacement": bool(self.replacement),
+            "epoch": int(self.epoch),
+        }
+
+    def _spec_signature(self) -> dict[str, Any]:
+        sample_ids = self.specs.sample_ids or ()
+        return {
+            "count": len(self.specs),
+            "indices_sha256": hashlib.sha256(self.specs.indices.tobytes()).hexdigest(),
+            "atoms_sha256": hashlib.sha256(self.specs.atoms.tobytes()).hexdigest(),
+            "frames_sha256": hashlib.sha256(self.specs.frames.tobytes()).hexdigest(),
+            "tasks_sha256": hashlib.sha256(self.specs.tasks.tobytes()).hexdigest(),
+            "bucket_group_ids_sha256": hashlib.sha256(self.specs.bucket_group_ids.tobytes()).hexdigest(),
+            "group_keys": [list(key) for key in self.specs.group_keys],
+            "sample_ids_sha256": hashlib.sha256(
+                json.dumps(list(sample_ids), separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "epoch": int(self.epoch),
+            "seed": int(self.seed),
+            "replacement": bool(self.replacement),
+            "shuffle": bool(self.shuffle),
+            "drop_last": bool(self.drop_last),
+            "oversize_policy": self.oversize_policy,
+            "max_tokens": int(self.max_tokens),
+            "num_replicas": int(self.num_replicas),
+            "rank": int(self.rank),
+            "batches_per_epoch": int(self._batches_per_epoch),
+            "batches_per_epoch_explicit": bool(self._batches_per_epoch_explicit),
+            "task_weights": {str(key): float(value) for key, value in self.task_weights.items()},
+            "time_bucket_weights": {str(key): float(value) for key, value in self.time_bucket_weights.items()},
+            "spec_signature": self._spec_signature(),
+        }
+
+    def validate_state_dict(self, state: Mapping[str, Any]) -> None:
+        if not isinstance(state, Mapping):
+            raise ValueError("sampler state must be a mapping")
+        exact = {
+            "seed": (int, self.seed, "seed"),
+            "replacement": (bool, self.replacement, "replacement"),
+            "shuffle": (bool, self.shuffle, "shuffle"),
+            "drop_last": (bool, self.drop_last, "drop_last"),
+            "oversize_policy": (str, self.oversize_policy, "oversize_policy"),
+            "max_tokens": (int, self.max_tokens, "max_tokens"),
+            "num_replicas": (int, self.num_replicas, "num_replicas"),
+            "rank": (int, self.rank, "rank"),
+            "batches_per_epoch": (int, self._batches_per_epoch, "batches_per_epoch"),
+            "batches_per_epoch_explicit": (bool, self._batches_per_epoch_explicit, "batches_per_epoch_explicit"),
+        }
+        for key, (_kind, expected, label) in exact.items():
+            if key not in state:
+                raise ValueError(f"sampler checkpoint is missing {label}")
+            actual = state[key]
+            if isinstance(expected, bool):
+                matches = isinstance(actual, bool) and actual == expected
+            elif isinstance(expected, int):
+                matches = isinstance(actual, (int, np.integer)) and int(actual) == expected
+            else:
+                matches = str(actual) == expected
+            if not matches:
+                raise ValueError(f"sampler {label} differs from checkpoint")
+        if dict(state.get("task_weights", {})) != {
+            str(key): float(value) for key, value in self.task_weights.items()
+        }:
+            raise ValueError("sampler task_weights differ from checkpoint")
+        if dict(state.get("time_bucket_weights", {})) != {
+            str(key): float(value) for key, value in self.time_bucket_weights.items()
+        }:
+            raise ValueError("sampler time_bucket_weights differ from checkpoint")
+        if state.get("spec_signature") != self._spec_signature():
+            raise ValueError("sampler dataset/specification differs from checkpoint")
+        epoch = state.get("epoch")
+        if not isinstance(epoch, (int, np.integer)) or int(epoch) < 0:
+            raise ValueError("sampler epoch must be a non-negative integer")
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        self.validate_state_dict(state)
+        self.set_epoch(int(state["epoch"]))
+
     def batch_complexity(self, batch: Sequence[int]) -> int:
         by_index = {int(self.specs[position].index): position for position in range(len(self.specs))}
         return sum(self.specs[by_index[int(index)]].effective_tokens for index in batch)
@@ -739,6 +884,11 @@ def make_clip_dataloader(
     collate_fn: Callable[[Sequence[Mapping[str, Any]]], Any] | None = None,
     num_workers: int = 0,
     pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int = 2,
+    trusted_store_fast_path: bool = False,
+    strict_record_validation: bool = True,
+    oversize_policy: str = "error",
     **sampler_kwargs: Any,
 ) -> torch.utils.data.DataLoader:
     """Build a DataLoader using the T03 batch sampler.
@@ -746,21 +896,49 @@ def make_clip_dataloader(
     batch_sampler owns the full list of indices for each minibatch, so no
     second distributed sampler or batch-size argument should be supplied.
     """
-    if sampler is not None and (max_tokens is not None or sampler_kwargs):
+    if sampler is not None and (
+        max_tokens is not None
+        or sampler_kwargs
+        or oversize_policy != "error"
+    ):
         raise ValueError("pass either sampler or sampler construction arguments")
+    if trusted_store_fast_path and strict_record_validation:
+        raise ValueError(
+            "trusted_store_fast_path requires strict_record_validation=False"
+        )
     if sampler is None:
         sampler = TaskAwareClipBatchSampler(
-            dataset, max_tokens=max_tokens, **sampler_kwargs
+            dataset,
+            max_tokens=max_tokens,
+            oversize_policy=oversize_policy,
+            **sampler_kwargs,
         )
     if collate_fn is None:
         collate_fn = getattr(dataset, "collate_fn", None) or collate_clip_records
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_sampler=sampler,
-        collate_fn=collate_fn,
-        num_workers=int(num_workers),
-        pin_memory=bool(pin_memory),
-    )
+    if trusted_store_fast_path:
+        if collate_fn is not collate_clip_records:
+            raise ValueError(
+                "trusted_store_fast_path is only valid with collate_clip_records"
+            )
+        collate_fn = partial(collate_clip_records, validate=False)
+    worker_count = int(num_workers)
+    if worker_count < 0:
+        raise ValueError("num_workers must be non-negative")
+    loader_kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_sampler": sampler,
+        "collate_fn": collate_fn,
+        "num_workers": worker_count,
+        "pin_memory": bool(pin_memory),
+    }
+    if worker_count:
+        if int(prefetch_factor) < 1:
+            raise ValueError("prefetch_factor must be positive")
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
+        loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+    elif persistent_workers:
+        raise ValueError("persistent_workers requires num_workers > 0")
+    return torch.utils.data.DataLoader(**loader_kwargs)
 
 
 build_clip_dataloader = make_clip_dataloader

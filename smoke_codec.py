@@ -74,7 +74,7 @@ def run_one_device(device: str, root: str | None, checkpoint: Path) -> dict[str,
         num_rbf=8,
         num_heads=2,
         max_num_neighbors=16,
-        neighbor_backend="optimized" if selected.type == "cuda" else "dense",
+        neighbor_backend="cuda_radius" if selected.type == "cuda" else "dense_test",
         time_scale_ps=100.0,
     )
     config = CodecTrainConfig(
@@ -106,7 +106,7 @@ def run_one_device(device: str, root: str | None, checkpoint: Path) -> dict[str,
             num_rbf=8,
             num_heads=2,
             max_num_neighbors=16,
-            neighbor_backend="optimized" if selected.type == "cuda" else "dense",
+            neighbor_backend="cuda_radius" if selected.type == "cuda" else "dense_test",
             time_scale_ps=100.0,
         ),
         batches,
@@ -142,7 +142,7 @@ def _ddp_codec_worker(rank: int, devices: tuple[int, ...], init_file: str, resul
     try:
         torch.manual_seed(100 + rank)
         torch.cuda.manual_seed_all(100 + rank)
-        batch = _to_device(_batches(None)[rank % 2], device)
+        cpu_batch = _batches(None)[rank % 2]
         model = PVBCodecModel(
             hidden_channels=16,
             spatial_layers=1,
@@ -151,9 +151,13 @@ def _ddp_codec_worker(rank: int, devices: tuple[int, ...], init_file: str, resul
             num_rbf=8,
             num_heads=2,
             max_num_neighbors=16,
-            neighbor_backend="optimized",
+            neighbor_backend="cuda_radius",
             time_scale_ps=100.0,
         ).to(device)
+        # DDP does not proxy the explicit CPU registration phase. Register on
+        # the underlying model before moving any topology-bearing fields.
+        model.prepare_batch(cpu_batch)
+        batch = _to_device(cpu_batch, device)
         ddp_model = DistributedDataParallel(model, device_ids=[device_id], output_device=device_id)
         config = CodecTrainConfig(
             lr=1e-4,

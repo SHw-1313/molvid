@@ -357,3 +357,58 @@ Do not claim long-horizon superiority from this pilot; there is no rollout task 
 ## 10. Completion definition
 
 The code milestone is complete when G0–G4 pass and the operator can launch G5 from documented commands. The scientific milestone is complete only after G5 results are recorded in `HANDOFF.md` and the ratio-4 codec receives an explicit go/no-go decision.
+
+## 11. Luna review repair status — 2026-08-27
+
+The review repair was implemented in priority order. The code-level requirements are covered by the new contract/regression tests, while GPU- and artifact-store-dependent acceptance remains explicitly bounded:
+
+| Review item | Status | Evidence / remaining boundary |
+|---|---|---|
+| P1-A standard CUDA ordering | partially verified | Shared CPU-prepare/transfer helper, evaluator/DDP fixes, CPU dense tests, and ordering regression are in place. A fresh real CUDA evaluator/DDP run is deferred while all visible GPUs are occupied. |
+| P1-B model/graph checkpoint contract | fixed | v2 checkpoint fields, model reconstruction, semantic mismatch rejection, explicit v1 legacy path, and parameter-key/shape/count tests. |
+| P1-C atomic resume | fixed | Preflight validation, exact optimizer/sampler/normalization checks, allowed `max_steps` extension, rollback, and next-step equality tests. |
+| P1-D FP32/BF16/SE(3) gate | partially verified | Immutable external-reference loader/builder, executable FP32 gradient/output/loss comparisons, true BF16 relative error, synthetic CUDA cap-unsaturated comparison, and production-CUDA SE(3) code are present. Real fixed-batch execution is blocked by the absent external manifest and busy GPUs. |
+| P2-E split isolation | fixed | Train-only canonical selection, provenance/hash manifest, evaluation contract check, and conflicting earlier-validation test. |
+| P2-F synchronization | partially verified | Host metadata and async assertions remove known hot-path scalar/CPU graph work; profiler script exists. No before/after measurement can be claimed without a baseline and free GPU. |
+| P2-G tracked artifacts | blocked pending operator action | Inventory and guard are present; the current branch still contains tracked checkpoint blobs. No deletion, LFS migration, or history rewrite was authorized. |
+| cache scalability | fixed | CPU canonical source retention and exact atom-count/identity validation survive bounded GPU-cache eviction. |
+
+The full test command and final count are recorded in the Luna handoff after the last verification run. These statuses do not claim convergence, quality, or full-data performance.
+
+## 12. Continued GPU validation — 2026-08-27
+
+The immutable reference was generated and the real Phase-A entry completed with status: passed before a final no-semantic-change synchronization repair. During that run, the synthetic gate exposed and the code repaired a CPU-leaf gradient accumulation bug in the acceptance harness. The subsequent profiler showed that the installed torch_cluster.radius_graph derives its batch size with int(batch.max()) when no explicit batch_size is supplied; CudaRadiusNeighborList now requires and forwards the host-derived graph count.
+
+The complete CPU suite passes after the repair. The existing profiler JSONs are after-only measurements from immediately before the explicit batch_size patch, so they are evidence for the diagnosis, not final post-patch timing. A current GPU snapshot has no safely idle device pair. Final post-patch acceptance replay, post-patch topology/distance-only profiles, and two-rank NCCL DDP are therefore still open.
+
+
+## 13. Post-patch GPU validation — 2026-08-27
+
+The previously open real-GPU checks were completed after host GPUs 0, 1, and 5 became available. The current tree has:
+
+| Check | Result | Evidence |
+|---|---|---|
+| Real fixed-batch Phase-A acceptance | passed | outputs/engineering_v1/phase_a/acceptance.json |
+| Two-rank NCCL DDP smoke | passed | outputs/engineering_v1/ddp_smoke.json |
+| Topology runtime profile | completed after-only | outputs/engineering_v1/profiling/topology.json |
+| Distance-only runtime profile | completed after-only | outputs/engineering_v1/profiling/distance_only.json |
+| Standard CUDA evaluator | completed for one validation batch and all three controls | outputs/engineering_v1/standard_eval_one_batch.json and .md |
+| CPU regression suite and compileall | passed | 53 tests, one pre-existing warning; compileall clean |
+
+The evaluator smoke intentionally used no trained checkpoint and must not be read as convergence evidence. P2-F remains partially verified because a pre-fix profiler baseline was not captured, so only post-patch latency/data-wait measurements are reported. P2-G remains operator-gated because tracked binary migration or history rewriting was not authorized.
+
+
+## 14. Tracked binary cleanup — 2026-08-28
+
+The operator-approved cleanup removed generated output binaries from the current Git index while preserving local experiment files.
+
+| Item | Result |
+|---|---|
+| Generated tracked output binaries | 29 removed from the index |
+| Local checkpoint/reference files | preserved in the worktree |
+| Ignore policy | added for output checkpoint/data suffixes |
+| Remaining tracked binary | module/equiformer_v2/Jd.pt, 21,697 bytes |
+| Artifact guard | passed with zero violations |
+| Git history rewrite | not performed |
+
+The last item is deliberate: removing current tracking is reversible and reviewable, while filter-repo/history rewriting and force-push would change shared history. That separate operation should only be run with an explicit repository-history plan.

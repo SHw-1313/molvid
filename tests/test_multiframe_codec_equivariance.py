@@ -39,7 +39,7 @@ def _encoder() -> PVBFrameEncoder:
         num_rbf=8,
         num_heads=4,
         max_num_neighbors=4,
-        neighbor_backend="dense",
+        neighbor_backend="dense_test",
     ).eval()
 
 
@@ -48,6 +48,7 @@ def test_t1_and_t16_use_time_major_shapes_with_real_torchmd():
     encoder = _encoder()
     for frames in (1, 16):
         batch = collate_clip_records([_record("x", frames=frames)])
+        encoder.prepare_batch(batch)
         output = encoder(batch)
         assert output.h.shape[:2] == (frames, 4)
         assert output.v.shape[:3] == (frames, 4, 3)
@@ -68,7 +69,9 @@ def test_scalar_translation_invariance_and_vector_rotation_equivariance():
         x=base.x + translation,
         bpos=base.bpos + translation,
     )
+    encoder.prepare_batch(base)
     output = encoder(base)
+    encoder.prepare_batch(translated)
     translated_output = encoder(translated)
     assert torch.allclose(output.h, translated_output.h, atol=2e-5, rtol=2e-5)
     assert torch.allclose(output.v, translated_output.v, atol=2e-5, rtol=2e-5)
@@ -81,6 +84,7 @@ def test_scalar_translation_invariance_and_vector_rotation_equivariance():
         x=torch.einsum("tnj,ji->tni", base.x, rotation),
         bpos=torch.einsum("tnj,ji->tni", base.bpos, rotation),
     )
+    encoder.prepare_batch(rotated)
     rotated_output = encoder(rotated)
     expected_vectors = torch.einsum("tnjc,ji->tnic", output.v, rotation)
     assert torch.allclose(output.h, rotated_output.h, atol=3e-4, rtol=3e-4)
@@ -100,7 +104,7 @@ def test_checkpoint_report_lists_matched_and_unexpected_keys(tmp_path):
         num_rbf=8,
         num_heads=4,
         max_num_neighbors=4,
-        neighbor_backend="dense",
+        neighbor_backend="dense_test",
         checkpoint_path=checkpoint,
     )
     report = target.checkpoint_report
