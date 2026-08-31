@@ -443,3 +443,9 @@ Evidence: agents/TRACKED_ARTIFACT_INVENTORY.json, scripts/check_tracked_artifact
 - [x] Built and verified a binary-free branch tip based on origin/main; the entire reachable history has zero blobs over 100 MB.
 - [x] Preserved the former branch tip, including its historical binaries, at fix/graph-runtime-v1-history-with-binaries.
 - [x] Kept the working branch name fix/graph-runtime-v1 so a normal non-force push can create the previously rejected remote branch.
+
+
+### 2026-08-31 — Push authentication boundary
+
+- [x] Attempted the requested normal push of the binary-free fix/graph-runtime-v1 tip.
+- [~] The push reached GitHub authentication but the container has no HTTPS username/token, credential helper, or gh login. It was aborted without storing credentials; origin/fix/graph-runtime-v1 remains absent.

@@ -247,3 +247,10 @@ Why: this removes generated checkpoints from the repository's current tracked st
 When a remote rejects historical generated binaries, create a new tip from origin/main and the already-clean current tree, verify every reachable blob is below 100 MB, and retain the former branch tip under a clearly named local backup branch. Publish the clean branch with a normal push when the remote branch was never created.
 
 Why: deleting binaries only in the latest commit does not remove historical objects. This approach avoids losing the old experiment history, avoids force-push against an existing remote branch, and makes the exact GitHub compatibility check auditable.
+
+
+### D039 — Do not handle GitHub credentials inside the agent session
+
+If a verified push reaches an HTTPS username prompt and no credential helper or gh login is available, abort without accepting or logging a password/token. Leave the already-verified local branch ready for the operator's authenticated push.
+
+Why: the repository history is now GitHub-compatible, while credential collection is an external authorization boundary and secrets must not enter the agent transcript or workspace.

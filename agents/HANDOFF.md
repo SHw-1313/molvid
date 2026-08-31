@@ -625,3 +625,16 @@ The current branch was repaired without deleting the old history:
 - candidate reachable blobs over 100 MB: 0.
 
 The clean tip uses the current source/metadata tree, which already excludes generated output binaries. The local worktree remains clean. The docs-only follow-up commit records this cleanup before the normal push. No force-push is needed because git ls-remote reported no existing origin/fix/graph-runtime-v1 ref after the rejection.
+
+
+### 2026-08-31 — Push authentication blocker
+
+The requested normal push of fix/graph-runtime-v1 was attempted after the binary-free history repair. GitHub accepted the connection far enough to ask for the HTTPS username, but this container has no configured credential helper and no gh login. I aborted at the username prompt; no password or token was entered, stored, or exposed, and the remote branch remains absent.
+
+Once the operator authenticates GitHub in the container or runs the command from an authenticated terminal, the candidate is ready for:
+
+~~~text
+git push -u origin fix/graph-runtime-v1
+~~~
+
+This is not a Git history or file-size blocker anymore.
