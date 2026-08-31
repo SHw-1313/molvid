@@ -412,3 +412,10 @@ The operator-approved cleanup removed generated output binaries from the current
 | Git history rewrite | not performed |
 
 The last item is deliberate: removing current tracking is reversible and reviewable, while filter-repo/history rewriting and force-push would change shared history. That separate operation should only be run with an explicit repository-history plan.
+
+
+## 15. GitHub-compatible history cleanup — 2026-08-31
+
+The rejected push was caused by large blobs in historical commits, not by the current tree. A new clean tip was created from origin/main using the already-clean current tree. The previous branch tip remains reachable through fix/graph-runtime-v1-history-with-binaries, so the original history was not deleted.
+
+The candidate branch was checked with git rev-list --objects plus git cat-file --batch-check: zero reachable blobs exceed 100,000,000 bytes. The next operation is a normal push of fix/graph-runtime-v1; no force-push is required because origin has no branch with that name after the rejected attempt.

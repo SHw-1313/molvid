@@ -240,3 +240,10 @@ Why: the validation request concerns the repaired runtime, while other users' jo
 For the operator-approved cleanup, remove the 29 generated binary artifacts under outputs/ with git rm --cached, retain their local working-tree copies, and add suffix-specific outputs ignore rules. Keep module/equiformer_v2/Jd.pt because it is a small source dependency. Do not run filter-repo, delete historical objects, or force-push as part of this working-tree cleanup.
 
 Why: this removes generated checkpoints from the repository's current tracked state without destroying experiment results or rewriting shared history. A historical size purge is a separate destructive operation requiring its own reviewed target list and recovery plan.
+
+
+### D038 — Publish a binary-free squashed tip while preserving the old branch
+
+When a remote rejects historical generated binaries, create a new tip from origin/main and the already-clean current tree, verify every reachable blob is below 100 MB, and retain the former branch tip under a clearly named local backup branch. Publish the clean branch with a normal push when the remote branch was never created.
+
+Why: deleting binaries only in the latest commit does not remove historical objects. This approach avoids losing the old experiment history, avoids force-push against an existing remote branch, and makes the exact GitHub compatibility check auditable.

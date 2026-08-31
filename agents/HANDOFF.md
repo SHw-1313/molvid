@@ -610,3 +610,18 @@ policy.violations: []
 ~~~
 
 The full test suite after cleanup is 53 passed with one pre-existing torch.load warning. Git history was not rewritten and no force-push was attempted. Therefore the current index is clean of generated output binaries, but old objects remain in historical commits until a separately reviewed history-purge operation is performed.
+
+
+### 2026-08-31 — GitHub push rejection repaired
+
+The attempted push was rejected because six engineering reference/checkpoint files in older branch commits exceeded GitHub's 100 MB per-file limit. Removing them only from the latest index was insufficient because GitHub validates all objects reachable from the pushed history.
+
+The current branch was repaired without deleting the old history:
+
+- old tip: 1b05e4f3f5fba864849ae8a34fecb7b2628659fa;
+- clean tip: 3944e0404f71e4c0d9f98e85f984b8672ad5c086;
+- clean tip parent: origin/main at 6459d3c0e823491b09295930bf6d5929a8f9961b;
+- preserved old history: fix/graph-runtime-v1-history-with-binaries;
+- candidate reachable blobs over 100 MB: 0.
+
+The clean tip uses the current source/metadata tree, which already excludes generated output binaries. The local worktree remains clean. The docs-only follow-up commit records this cleanup before the normal push. No force-push is needed because git ls-remote reported no existing origin/fix/graph-runtime-v1 ref after the rejection.

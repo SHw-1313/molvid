@@ -435,3 +435,11 @@ Evidence: outputs/engineering_v1/phase_a/acceptance.json, outputs/engineering_v1
 - [~] Historical Git objects were not rewritten or force-pushed. The current index/worktree cleanup is complete; a separate reviewed history purge would be required if repository size must also be reduced retroactively.
 
 Evidence: agents/TRACKED_ARTIFACT_INVENTORY.json, scripts/check_tracked_artifacts.py --check, and the staged index deletions shown by git diff --cached.
+
+
+### 2026-08-31 — GitHub push cleanup
+
+- [x] Diagnosed the rejected push: the current tree was binary-free, but the branch history still carried 29 large output blobs.
+- [x] Built and verified a binary-free branch tip based on origin/main; the entire reachable history has zero blobs over 100 MB.
+- [x] Preserved the former branch tip, including its historical binaries, at fix/graph-runtime-v1-history-with-binaries.
+- [x] Kept the working branch name fix/graph-runtime-v1 so a normal non-force push can create the previously rejected remote branch.
