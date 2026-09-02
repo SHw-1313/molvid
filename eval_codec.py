@@ -192,13 +192,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_config = raw.get("model", {})
     if not isinstance(model_config, Mapping):
         raise ValueError("model config must be a mapping")
+    configured_backbone = str(
+        model_config.get("spatial_backbone", "torchmd_et")
+    ).lower()
     configured_mode = _model_bond_mode(model_config)
     if args.bond_mode is not None and args.bond_mode != configured_mode:
         raise ValueError(
             f"--bond-mode={args.bond_mode!r} conflicts with YAML bond_construction.mode={configured_mode!r}"
         )
     requested_mode = args.bond_mode or configured_mode
-    if requested_mode not in {"topology", "distance_only"}:
+    if configured_backbone == "visnet_radius":
+        if args.bond_mode not in (None, "topology"):
+            raise ValueError(
+                "visnet_radius does not accept an external bond-construction mode"
+            )
+        requested_mode = "native_radius"
+    if requested_mode not in {"topology", "distance_only", "native_radius"}:
         raise ValueError(f"unsupported bond construction mode: {requested_mode!r}")
     if args.legacy_bond_mode is not None and args.legacy_bond_mode != requested_mode:
         raise ValueError("--legacy-bond-mode conflicts with the configured bond mode")

@@ -1224,7 +1224,7 @@ def _source_audit() -> dict[str, Any]:
     union_source = (ROOT / "module/multiframe_codec.py").read_text(encoding="utf-8")
     neighbor_forward_source = inspect.getsource(CudaRadiusNeighborList.__call__)
     encoder_forward_source = inspect.getsource(PVBFrameEncoder.forward)
-    encoder_graph_source = inspect.getsource(PVBFrameEncoder.build_graph)
+    encoder_graph_source = inspect.getsource(PVBFrameEncoder.build_external_graph)
     if "positions.cpu" in graph_source or "graph_id.cpu" in graph_source:
         raise RuntimeError("production neighbor source contains a CPU graph round trip")
     if "torch.isin" in union_source:

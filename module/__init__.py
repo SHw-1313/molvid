@@ -4,8 +4,17 @@ from .multiframe_codec import (
     FrameEncoder,
     FrameEncoderOutput,
     FrameGraphBatch,
+    FrameNodeBatch,
     PVBFrameEncoder,
     PVBFrameGraph,
+    pack_frame_nodes,
+)
+from .visnet import (
+    MolViSNetEncoder,
+    SpatialEncoderOutput,
+    SUPPORTED_SPATIAL_BACKBONES,
+    build_spatial_backbone,
+    make_spatial_backbone,
 )
 
 from .temporal_codec import (

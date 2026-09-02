@@ -24,6 +24,12 @@ from .bond_sources import DistanceOnlyBondCache
 from .neighbor_graph import NeighborList, make_neighbor_list
 from .topology_cache import BoundedTopologyCache
 from .torchmd_et import TorchMD_VQ_ET
+from .visnet import (
+    MolViSNetEncoder,
+    SpatialEncoderOutput,
+    SUPPORTED_SPATIAL_BACKBONES,
+    make_spatial_backbone,
+)
 
 
 def _get_field(batch: ClipBatch | Mapping[str, Any], name: str) -> Any:
@@ -118,6 +124,117 @@ def _expand_atom_field(value: Tensor, *, frames: int, atoms: int, name: str) -> 
 
 
 @dataclass
+class FrameNodeBatch:
+    """Packed frame nodes independent of any spatial graph construction."""
+
+    pos: Tensor  # [T*N_total, 3]
+    z: Tensor  # [T*N_total]
+    b: Tensor  # [T*N_total]
+    batch: Tensor  # [T*N_total], graph id = frame_id * B + sample_id
+    graph_id: Tensor  # explicit graph-id alias
+    frame_id: Tensor  # [T*N_total]
+    sample_id: Tensor  # [T*N_total]
+    frame_mask: Tensor  # [B, T]
+    atom_counts: tuple[int, ...]
+    frames: int
+    atoms: int
+    batch_size: int
+    graph_count: int
+
+    @property
+    def num_nodes(self) -> int:
+        return int(self.pos.shape[0])
+
+
+def pack_frame_nodes(batch: ClipBatch | Mapping[str, Any]) -> FrameNodeBatch:
+    """Pack atom metadata into frame-isolated nodes without building edges."""
+
+    x = _as_tensor(_get_field(batch, "x"), name="x")
+    if x.ndim != 3 or x.shape[-1] != 3:
+        raise ValueError("x must have shape [T, N_total, 3]")
+    frames, atoms = int(x.shape[0]), int(x.shape[1])
+    if frames < 1 or atoms < 1:
+        raise ValueError("x must contain at least one frame and one atom")
+    if x.dtype != torch.float32:
+        raise RuntimeError(
+            "frame graph geometry requires original FP32 coordinates; "
+            "do not cast coordinates to BF16"
+        )
+
+    atom_ptr = _as_tensor(
+        _get_field(batch, "atom_ptr"), name="atom_ptr", dtype=torch.long
+    ).flatten()
+    if atom_ptr.ndim != 1 or atom_ptr.numel() < 2:
+        raise ValueError("atom_ptr must have shape [B+1]")
+    atom_counts = _host_atom_counts(batch, atoms)
+    batch_size = len(atom_counts)
+    if atom_ptr.numel() != batch_size + 1:
+        raise ValueError("atom_ptr and host atom_counts disagree")
+    if atom_ptr.device.type == "cpu":
+        if int(atom_ptr[0]) != 0 or int(atom_ptr[-1]) != atoms:
+            raise ValueError("atom_ptr must span the packed atom axis")
+        if torch.any(atom_ptr[1:] <= atom_ptr[:-1]):
+            raise ValueError("atom_ptr must contain strictly increasing sample offsets")
+
+    abid = _as_tensor(_get_field(batch, "abid"), name="abid", dtype=torch.long).flatten()
+    if abid.numel() != atoms:
+        raise ValueError("abid must have shape [N_total]")
+    count_tensor = torch.tensor(atom_counts, device=abid.device, dtype=torch.long)
+    expected_abid = torch.repeat_interleave(
+        torch.arange(batch_size, device=abid.device, dtype=torch.long),
+        count_tensor,
+    )
+    _assert_device_condition(
+        abid == expected_abid,
+        "abid must agree with host atom_counts and packed sample order",
+    )
+
+    frame_mask = _as_tensor(
+        _get_field(batch, "frame_mask"), name="frame_mask", dtype=torch.bool
+    )
+    if frame_mask.shape != (batch_size, frames):
+        raise ValueError("frame_mask must have shape [B, T]")
+    _assert_device_condition(
+        torch.any(frame_mask, dim=1),
+        "every sample must contain at least one valid frame",
+    )
+
+    pos = x.reshape(frames * atoms, 3)
+    z = _expand_atom_field(
+        _as_tensor(_get_field(batch, "atype"), name="atype", dtype=torch.long),
+        frames=frames,
+        atoms=atoms,
+        name="atype",
+    )
+    b = _expand_atom_field(
+        _as_tensor(_get_field(batch, "btype"), name="btype", dtype=torch.long),
+        frames=frames,
+        atoms=atoms,
+        name="btype",
+    )
+    sample_id = abid.repeat(frames)
+    frame_id = torch.arange(
+        frames, device=pos.device, dtype=torch.long
+    ).repeat_interleave(atoms)
+    graph_id = frame_id * batch_size + sample_id
+    return FrameNodeBatch(
+        pos=pos,
+        z=z,
+        b=b,
+        batch=graph_id,
+        graph_id=graph_id,
+        frame_id=frame_id,
+        sample_id=sample_id,
+        frame_mask=frame_mask,
+        atom_counts=tuple(int(value) for value in atom_counts),
+        frames=frames,
+        atoms=atoms,
+        batch_size=batch_size,
+        graph_count=frames * batch_size,
+    )
+
+
+@dataclass
 class FrameGraphBatch:
     """Flattened graph inputs and topology used by one spatial encoder call."""
 
@@ -139,6 +256,8 @@ class FrameGraphBatch:
     frame_mask: Tensor  # [B, T]
     backend_used: str
     bond_construction_mode: str
+    graph_mode: str = "external"
+    spatial_backbone: str = "torchmd_et"
 
     @property
     def num_nodes(self) -> int:
@@ -201,7 +320,7 @@ class CheckpointLoadReport:
 
 @dataclass
 class FrameEncoderOutput:
-    """Time-major scalar/vector features plus the auditable graph batch."""
+    """Time-major scalar/vector features plus auditable graph metadata."""
 
     h: Tensor  # [T, N_total, C], invariant scalar features
     v: Tensor  # [T, N_total, 3, C], equivariant vector features
@@ -215,6 +334,18 @@ class FrameEncoderOutput:
     def vector(self) -> Tensor:
         return self.v
 
+    @property
+    def backend_used(self) -> str:
+        return self.graph.backend_used
+
+    @property
+    def graph_mode(self) -> str:
+        return self.graph.graph_mode
+
+    @property
+    def spatial_backbone(self) -> str:
+        return self.graph.spatial_backbone
+
     def __iter__(self):
         # Keep the common ``h, v = encoder(batch)`` spelling convenient while
         # retaining graph metadata for tests and downstream codec modules.
@@ -223,15 +354,16 @@ class FrameEncoderOutput:
 
 
 class PVBFrameEncoder(nn.Module):
-    """Batch all frames through one shared :class:`TorchMD_VQ_ET` call.
+    """Batch all frames through one shared selectable spatial-backbone call.
 
     ``ClipBatch.x`` is time-major and atoms are packed by sample.  The graph
     id formula is deliberately explicit and stable:
 
     ``graph_id[t, atom] = t * batch_size + abid[atom]``.
 
-    The default backbone is the existing PVB TorchMD implementation.  Tests
-    and small downstream adapters may inject an equivalent module through
+    The default backbone is the existing PVB TorchMD implementation.  ViSNet
+    variants use the same node packing and expose the same representation
+    contract. Tests and small downstream adapters may inject an equivalent module through
     ``spatial_encoder``; it must return scalar and vector features as its
     first two outputs.
     """
@@ -245,6 +377,11 @@ class PVBFrameEncoder(nn.Module):
         cutoff_lower: float = 0.0,
         cutoff_upper: float = 5.0,
         max_num_neighbors: int = 32,
+        spatial_backbone: str = "torchmd_et",
+        lmax: int = 1,
+        vertex: bool = True,
+        trainable_rbf: bool = False,
+        vecnorm_type: str | None = None,
         *,
         spatial_encoder: nn.Module | None = None,
         encoder: nn.Module | None = None,
@@ -272,6 +409,16 @@ class PVBFrameEncoder(nn.Module):
                 "neighbor_backend must be 'cuda_radius' for production or "
                 "'dense_test' for explicit CPU tests"
             )
+        selected_backbone = str(spatial_backbone).lower()
+        if selected_backbone not in SUPPORTED_SPATIAL_BACKBONES:
+            raise ValueError(
+                f"unsupported spatial_backbone {spatial_backbone!r}; expected one of "
+                f"{SUPPORTED_SPATIAL_BACKBONES}"
+            )
+        if int(lmax) != 1:
+            raise ValueError(
+                f"spatial lmax must be lmax=1 for the codec vector contract; got {lmax}"
+            )
         if bond_construction is None:
             bond_config: dict[str, Any] = {"mode": "topology"}
         elif isinstance(bond_construction, str):
@@ -289,36 +436,48 @@ class PVBFrameEncoder(nn.Module):
         self.cutoff_upper = float(cutoff_upper)
         self.max_num_neighbors = int(max_num_neighbors)
         self.neighbor_backend = str(neighbor_backend)
-        self.bond_construction_mode = bond_mode
+        self.spatial_backbone = selected_backbone
+        self.graph_mode = (
+            "native_radius"
+            if selected_backbone == "visnet_radius"
+            else "external"
+        )
+        self.bond_construction_mode = (
+            "native_radius" if self.graph_mode == "native_radius" else bond_mode
+        )
         self.bond_construction = bond_config
-        self.neighbor_builder = make_neighbor_list(
-            self.neighbor_backend,
-            cutoff_lower=self.cutoff_lower,
-            cutoff_upper=self.cutoff_upper,
-            max_num_neighbors=self.max_num_neighbors,
-            loop=True,
-        )
-        self.topology_cache = BoundedTopologyCache(
-            max_canonical_entries=int(topology_cache_capacity),
-            max_device_entries=int(topology_device_cache_capacity),
-        )
-        self.distance_bond_cache = (
-            DistanceOnlyBondCache(
-                min_distance_angstrom=float(distance_bond_min),
-                max_distance_angstrom=float(distance_bond_max),
-                max_num_neighbors=int(distance_bond_max_num_neighbors),
-                capacity=int(distance_bond_cache_capacity),
+        self.neighbor_builder = None
+        self.topology_cache = None
+        self.distance_bond_cache = None
+        if self.graph_mode == "external":
+            self.neighbor_builder = make_neighbor_list(
+                self.neighbor_backend,
+                cutoff_lower=self.cutoff_lower,
+                cutoff_upper=self.cutoff_upper,
+                max_num_neighbors=self.max_num_neighbors,
+                loop=True,
             )
-            if bond_mode == "distance_only"
-            else None
-        )
+            self.topology_cache = BoundedTopologyCache(
+                max_canonical_entries=int(topology_cache_capacity),
+                max_device_entries=int(topology_device_cache_capacity),
+            )
+            self.distance_bond_cache = (
+                DistanceOnlyBondCache(
+                    min_distance_angstrom=float(distance_bond_min),
+                    max_distance_angstrom=float(distance_bond_max),
+                    max_num_neighbors=int(distance_bond_max_num_neighbors),
+                    capacity=int(distance_bond_cache_capacity),
+                )
+                if bond_mode == "distance_only"
+                else None
+            )
         self.spatial_encoder = (
             spatial_encoder if spatial_encoder is not None else encoder
         )
         if self.spatial_encoder is None:
-            self.spatial_encoder = TorchMD_VQ_ET(
+            self.spatial_encoder = make_spatial_backbone(
+                selected_backbone,
                 hidden_channels=hidden_channels,
-                extra_channels=0,
                 num_layers=num_layers,
                 num_rbf=num_rbf,
                 num_heads=num_heads,
@@ -327,7 +486,11 @@ class PVBFrameEncoder(nn.Module):
                 max_z=NUM_ATOM_TYPE,
                 max_b=NUM_BLOCK_TYPE,
                 max_num_neighbors=max_num_neighbors,
-                cross_attn=False,
+                neighbor_backend=neighbor_backend,
+                lmax=lmax,
+                vertex=vertex,
+                trainable_rbf=trainable_rbf,
+                vecnorm_type=vecnorm_type,
                 dtype=dtype,
             )
         self.checkpoint_report: CheckpointLoadReport | None = None
@@ -523,77 +686,29 @@ class PVBFrameEncoder(nn.Module):
             local_bonds.unsqueeze(1) + offsets.view(1, -1, 1)
         ).permute(0, 1, 2).reshape(2, -1)
 
-    def build_graph(self, batch: ClipBatch | Mapping[str, Any]) -> FrameGraphBatch:
+    def build_external_graph(
+        self,
+        nodes: FrameNodeBatch,
+        batch: ClipBatch | Mapping[str, Any],
+    ) -> FrameGraphBatch:
         """Prepare one isolated graph per ``(sample, frame)`` pair."""
 
-        x = _as_tensor(_get_field(batch, "x"), name="x")
-        if x.ndim != 3 or x.shape[-1] != 3:
-            raise ValueError("x must have shape [T, N_total, 3]")
-        frames, atoms = int(x.shape[0]), int(x.shape[1])
-        if frames < 1 or atoms < 1:
-            raise ValueError("x must contain at least one frame and one atom")
-
-        atom_ptr = _as_tensor(
-            _get_field(batch, "atom_ptr"), name="atom_ptr", dtype=torch.long
-        ).flatten()
-        if atom_ptr.ndim != 1 or atom_ptr.numel() < 2:
-            raise ValueError("atom_ptr must have shape [B+1]")
-        atom_counts = _host_atom_counts(batch, atoms)
-        batch_size = len(atom_counts)
-        if atom_ptr.numel() != batch_size + 1:
-            raise ValueError("atom_ptr and host atom_counts disagree")
-        if atom_ptr.device.type == "cpu":
-            if int(atom_ptr[0]) != 0 or int(atom_ptr[-1]) != atoms:
-                raise ValueError("atom_ptr must span the packed atom axis")
-            if torch.any(atom_ptr[1:] <= atom_ptr[:-1]):
-                raise ValueError("atom_ptr must contain strictly increasing sample offsets")
-
-        abid = _as_tensor(_get_field(batch, "abid"), name="abid", dtype=torch.long).flatten()
-        if abid.numel() != atoms:
-            raise ValueError("abid must have shape [N_total]")
-        count_tensor = torch.tensor(atom_counts, device=abid.device, dtype=torch.long)
-        expected_abid = torch.repeat_interleave(
-            torch.arange(batch_size, device=abid.device, dtype=torch.long),
-            count_tensor,
-        )
-        _assert_device_condition(
-            abid == expected_abid,
-            "abid must agree with host atom_counts and packed sample order",
-        )
-
-        frame_mask = _as_tensor(
-            _get_field(batch, "frame_mask"), name="frame_mask", dtype=torch.bool
-        )
-        if frame_mask.shape != (batch_size, frames):
-            raise ValueError("frame_mask must have shape [B, T]")
-        _assert_device_condition(
-            torch.any(frame_mask, dim=1),
-            "every sample must contain at least one valid frame",
-        )
-
-        if x.dtype != torch.float32:
+        if self.graph_mode != "external":
             raise RuntimeError(
-                "frame graph geometry requires original FP32 coordinates; "
-                "do not cast coordinates to BF16"
+                "visnet_radius uses native_radius; external graph construction "
+                "is intentionally unavailable"
             )
-        pos = x.reshape(frames * atoms, 3)
-        z = _expand_atom_field(
-            _as_tensor(_get_field(batch, "atype"), name="atype", dtype=torch.long),
-            frames=frames,
-            atoms=atoms,
-            name="atype",
-        )
-        b = _expand_atom_field(
-            _as_tensor(_get_field(batch, "btype"), name="btype", dtype=torch.long),
-            frames=frames,
-            atoms=atoms,
-            name="btype",
-        )
-        sample_id = abid.repeat(frames)
-        frame_id = torch.arange(
-            frames, device=pos.device, dtype=torch.long
-        ).repeat_interleave(atoms)
-        graph_id = frame_id * batch_size + sample_id
+        pos = nodes.pos
+        frames = nodes.frames
+        atoms = nodes.atoms
+        atom_counts = nodes.atom_counts
+        batch_size = nodes.batch_size
+        frame_mask = nodes.frame_mask
+        z = nodes.z
+        b = nodes.b
+        sample_id = nodes.sample_id
+        frame_id = nodes.frame_id
+        graph_id = nodes.graph_id
 
         topology_ids = tuple(str(value) for value in _get_field(batch, "topology_id"))
         if len(topology_ids) != batch_size:
@@ -678,6 +793,103 @@ class PVBFrameEncoder(nn.Module):
             frame_mask=frame_mask,
             backend_used=self.neighbor_builder.backend_used,
             bond_construction_mode=self.bond_construction_mode,
+            graph_mode=self.graph_mode,
+            spatial_backbone=self.spatial_backbone,
+        )
+
+    def build_graph(self, batch: ClipBatch | Mapping[str, Any]) -> FrameGraphBatch:
+        """Compatibility wrapper for callers that explicitly need external graphs."""
+
+        if self.graph_mode != "external":
+            raise RuntimeError(
+                "visnet_radius uses native_radius and has no external graph "
+                "compatibility path"
+            )
+        nodes = pack_frame_nodes(batch)
+        return self.build_external_graph(nodes, batch)
+
+    def _forward_external_spatial(
+        self,
+        nodes: FrameNodeBatch,
+        graph: FrameGraphBatch,
+    ) -> Any:
+        forward_external = getattr(self.spatial_encoder, "forward_external", None)
+        if callable(forward_external):
+            return forward_external(nodes, graph)
+        return self.spatial_encoder(
+            z=graph.z,
+            b=graph.b,
+            pos=graph.pos,
+            batch=graph.batch,
+            edge_index=graph.edge_index,
+            edge_weight_t=graph.edge_weight,
+            edge_vec_t=graph.edge_vec,
+            bond_type=graph.bond_type,
+        )
+
+    def _forward_native_spatial(self, nodes: FrameNodeBatch) -> Any:
+        forward_native = getattr(self.spatial_encoder, "forward_native", None)
+        if not callable(forward_native):
+            raise TypeError(
+                "visnet_radius requires a spatial encoder with forward_native(nodes)"
+            )
+        return forward_native(nodes)
+
+    def _native_graph(
+        self,
+        nodes: FrameNodeBatch,
+        result: Any,
+    ) -> FrameGraphBatch:
+        if not isinstance(result, SpatialEncoderOutput):
+            raise TypeError(
+                "native spatial encoders must return SpatialEncoderOutput with "
+                "the native graph metadata"
+            )
+        if (
+            result.edge_index is None
+            or result.edge_weight is None
+            or result.edge_vec is None
+        ):
+            raise ValueError(
+                "native spatial output is missing edge_index/edge_weight/edge_vec"
+            )
+        edge_type = result.edge_type
+        if edge_type is None:
+            edge_type = torch.zeros(
+                result.edge_index.shape[1],
+                dtype=torch.long,
+                device=result.edge_index.device,
+            )
+        empty_bonds = torch.empty(
+            (2, 0), dtype=torch.long, device=nodes.pos.device
+        )
+        if result.edge_index.numel():
+            _assert_device_condition(
+                nodes.graph_id[result.edge_index[0]]
+                == nodes.graph_id[result.edge_index[1]],
+                "native radius graph produced a cross-frame or cross-sample edge",
+            )
+        return FrameGraphBatch(
+            pos=nodes.pos,
+            z=nodes.z,
+            b=nodes.b,
+            batch=nodes.batch,
+            graph_id=nodes.graph_id,
+            frame_id=nodes.frame_id,
+            sample_id=nodes.sample_id,
+            edge_index=result.edge_index,
+            edge_weight=result.edge_weight,
+            edge_vec=result.edge_vec,
+            bond_type=edge_type,
+            bond_index=empty_bonds,
+            distance_edge_index=result.edge_index,
+            distance_edge_weight=result.edge_weight,
+            distance_edge_vec=result.edge_vec,
+            frame_mask=nodes.frame_mask,
+            backend_used=result.backend_used,
+            bond_construction_mode=self.bond_construction_mode,
+            graph_mode=result.graph_mode,
+            spatial_backbone=self.spatial_backbone,
         )
 
     @staticmethod
@@ -694,22 +906,18 @@ class PVBFrameEncoder(nn.Module):
         return h, v
 
     def forward(self, batch: ClipBatch | Mapping[str, Any]) -> FrameEncoderOutput:
-        # CPU topology registration is an explicit caller-side phase. Doing it
-        # here would be both too late for a CUDA batch and a hidden synchronizing
-        # pass on every forward.
-        graph = self.build_graph(batch)
-        result = self.spatial_encoder(
-            z=graph.z,
-            b=graph.b,
-            pos=graph.pos,
-            batch=graph.batch,
-            edge_index=graph.edge_index,
-            edge_weight_t=graph.edge_weight,
-            edge_vec_t=graph.edge_vec,
-            bond_type=graph.bond_type,
-        )
+        nodes = pack_frame_nodes(batch)
+        if self.graph_mode == "native_radius":
+            result = self._forward_native_spatial(nodes)
+            graph = self._native_graph(nodes, result)
+        else:
+            # CPU topology registration is an explicit caller-side phase.
+            # Doing it here would be too late for a CUDA batch and would hide
+            # a synchronizing pass on every forward.
+            graph = self.build_external_graph(nodes, batch)
+            result = self._forward_external_spatial(nodes, graph)
         h, v = self._unpack_features(result)
-        expected_nodes = graph.pos.shape[0]
+        expected_nodes = nodes.pos.shape[0]
         if h.ndim != 2 or h.shape[0] != expected_nodes:
             raise ValueError(
                 "spatial scalar output must have shape [T*N_total, C], "
@@ -720,8 +928,8 @@ class PVBFrameEncoder(nn.Module):
                 "spatial vector output must have shape [T*N_total, 3, C], "
                 f"got {tuple(v.shape)}"
             )
-        frames = int(_get_field(batch, "x").shape[0])
-        atoms = int(_get_field(batch, "x").shape[1])
+        frames = nodes.frames
+        atoms = nodes.atoms
         return FrameEncoderOutput(
             h=h.reshape(frames, atoms, h.shape[-1]),
             v=v.reshape(frames, atoms, 3, v.shape[-1]),
@@ -805,4 +1013,3 @@ class PVBFrameEncoder(nn.Module):
 # Short aliases keep the adapter discoverable without duplicating the model.
 FrameEncoder = PVBFrameEncoder
 PVBFrameGraph = FrameGraphBatch
-

@@ -196,7 +196,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         non_blocking_transfer=bool(data_config.get("non_blocking_transfer", True)),
     )
     model_bond_mode = model.frame_encoder.bond_construction_mode
-    if model_bond_mode == "distance_only":
+    if model.frame_encoder.graph_mode == "native_radius":
+        # Native radius ViSNet has no external topology/distance preparation.
+        # Its graph is built exactly once inside forward_native.
+        if model_bond_mode != "native_radius":
+            raise RuntimeError("native-radius backbone has an invalid graph mode")
+    elif model_bond_mode == "distance_only":
         # The frozen distance graph is a train-split artifact. Validation is
         # intentionally never part of canonical selection or cache setup.
         references = build_canonical_reference_index(
