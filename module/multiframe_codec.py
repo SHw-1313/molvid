@@ -382,6 +382,9 @@ class PVBFrameEncoder(nn.Module):
         vertex: bool = True,
         trainable_rbf: bool = False,
         vecnorm_type: str | None = None,
+        vertex_type: str | None = None,
+        rbf_type: str | None = None,
+        trainable_vecnorm: bool = False,
         *,
         spatial_encoder: nn.Module | None = None,
         encoder: nn.Module | None = None,
@@ -415,10 +418,43 @@ class PVBFrameEncoder(nn.Module):
                 f"unsupported spatial_backbone {spatial_backbone!r}; expected one of "
                 f"{SUPPORTED_SPATIAL_BACKBONES}"
             )
-        if int(lmax) != 1:
+        v2_backbone = selected_backbone in {
+            "visnet_v2_radius",
+            "visnet_v2_bonded",
+        }
+        if v2_backbone:
+            if int(lmax) not in {1, 2}:
+                raise ValueError(
+                    f"v2 spatial lmax must be 1 or 2; got {lmax}"
+                )
+        elif int(lmax) != 1:
             raise ValueError(
                 f"spatial lmax must be lmax=1 for the codec vector contract; got {lmax}"
             )
+        if not v2_backbone and (
+            vertex_type is not None
+            or rbf_type is not None
+            or bool(trainable_vecnorm)
+        ):
+            raise ValueError(
+                "vertex_type, rbf_type, and trainable_vecnorm are v2-only "
+                "options; legacy v1 backbones use vertex, Gaussian RBF, and "
+                "their existing vector semantics"
+            )
+        resolved_vertex_type = (
+            (
+                str(vertex_type).lower()
+                if vertex_type is not None
+                else ("edge" if bool(vertex) else "none")
+            )
+            if v2_backbone
+            else None
+        )
+        resolved_rbf_type = (
+            (str(rbf_type).lower() if rbf_type is not None else "expnorm")
+            if v2_backbone
+            else None
+        )
         if bond_construction is None:
             bond_config: dict[str, Any] = {"mode": "topology"}
         elif isinstance(bond_construction, str):
@@ -439,13 +475,16 @@ class PVBFrameEncoder(nn.Module):
         self.spatial_backbone = selected_backbone
         self.graph_mode = (
             "native_radius"
-            if selected_backbone == "visnet_radius"
+            if selected_backbone in {"visnet_radius", "visnet_v2_radius"}
             else "external"
         )
         self.bond_construction_mode = (
             "native_radius" if self.graph_mode == "native_radius" else bond_mode
         )
         self.bond_construction = bond_config
+        self.vertex_type = resolved_vertex_type
+        self.rbf_type = resolved_rbf_type
+        self.trainable_vecnorm = bool(trainable_vecnorm)
         self.neighbor_builder = None
         self.topology_cache = None
         self.distance_bond_cache = None
@@ -491,6 +530,9 @@ class PVBFrameEncoder(nn.Module):
                 vertex=vertex,
                 trainable_rbf=trainable_rbf,
                 vecnorm_type=vecnorm_type,
+                vertex_type=resolved_vertex_type,
+                rbf_type=resolved_rbf_type,
+                trainable_vecnorm=trainable_vecnorm,
                 dtype=dtype,
             )
         self.checkpoint_report: CheckpointLoadReport | None = None

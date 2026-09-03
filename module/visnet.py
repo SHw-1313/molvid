@@ -1,21 +1,12 @@
-"""Representation-only ViSNet spatial backbones.
+"""Legacy v1 representation-only ViSNet spatial backbones.
 
-This module adapts the representation block of ViSNet for MolViD's
-atom-level codec contract. It intentionally stops before the upstream
-energy/force heads: callers receive invariant scalar features and Cartesian
-l=1 vector features only.
+This file preserves the v1 MolViD scalar/vector implementation and its
+checkpoint semantics. It is intentionally not the reference-faithful ViSNet
+implementation; that implementation lives in module.visnet_v2 and is
+selected only by the new visnet_v2_* backend names.
 
-Upstream attribution
---------------------
-The radial basis, cutoff, and scalar/vector message-passing organization is
-adapted from TorchMD-Net's ViSNet implementation:
-https://github.com/torchmd/torchmd-net/blob/v2.0.0/torchmdnet/models/visnet.py
-Source reference: torchmd-net v2.0.0 (MIT License). The adapted code retains
-the upstream Universitat Pompeu Fabra 2020-2023 MIT attribution. No energy,
-force, atom-reference, or graph-reduction head is included here.
-
-Copyright (c) 2020-2023 Universitat Pompeu Fabra
-SPDX-License-Identifier: MIT
+The v1 code is a MolViD project implementation. It must not be attributed to
+TorchMD-Net's unrelated torchmdnet/models/visnet.py path.
 """
 
 from __future__ import annotations
@@ -33,7 +24,13 @@ from .neighbor_graph import NeighborList, make_neighbor_list
 from .torchmd_et import TorchMD_VQ_ET
 
 
-SUPPORTED_SPATIAL_BACKBONES = ("torchmd_et", "visnet_radius", "visnet_bonded")
+SUPPORTED_SPATIAL_BACKBONES = (
+    "torchmd_et",
+    "visnet_radius",
+    "visnet_bonded",
+    "visnet_v2_radius",
+    "visnet_v2_bonded",
+)
 
 
 @dataclass
@@ -48,6 +45,8 @@ class SpatialEncoderOutput:
     edge_type: Optional[Tensor] = None
     backend_used: str = "unknown"
     graph_mode: str = "external"
+    # Optional full internal lmax=2 state. v1 never populates this field.
+    v_full: Optional[Tensor] = None
 
     @property
     def scalar(self) -> Tensor:
@@ -518,9 +517,12 @@ def make_spatial_backbone(
     vertex: bool = True,
     trainable_rbf: bool = False,
     vecnorm_type: str | None = None,
+    vertex_type: str | None = None,
+    rbf_type: str | None = None,
+    trainable_vecnorm: bool = False,
     **_: Any,
 ) -> nn.Module:
-    """Build one of the three selectable spatial backbones."""
+    """Build one of the legacy or reference-faithful spatial backbones."""
 
     selected = str(name).lower()
     if selected == "torchmd_et":
@@ -555,6 +557,36 @@ def make_spatial_backbone(
             max_b=max_b,
             neighbor_backend=neighbor_backend,
             dtype=dtype,
+        )
+    if selected in {"visnet_v2_radius", "visnet_v2_bonded"}:
+        from .visnet_v2 import V2SpatialEncoder
+
+        resolved_vertex_type = (
+            str(vertex_type).lower()
+            if vertex_type is not None
+            else ("edge" if bool(vertex) else "none")
+        )
+        resolved_rbf_type = "expnorm" if rbf_type is None else str(rbf_type).lower()
+        return V2SpatialEncoder(
+            hidden_channels=hidden_channels,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_rbf=num_rbf,
+            lmax=lmax,
+            vertex_type=resolved_vertex_type,
+            cutoff_lower=cutoff_lower,
+            cutoff_upper=cutoff_upper,
+            max_num_neighbors=max_num_neighbors,
+            rbf_type=resolved_rbf_type,
+            trainable_rbf=trainable_rbf,
+            vecnorm_type=vecnorm_type,
+            trainable_vecnorm=trainable_vecnorm,
+            max_z=max_z,
+            max_b=max_b,
+            neighbor_backend=neighbor_backend,
+            dtype=dtype,
+            use_block_embedding=True,
+            use_bond_embedding=selected == "visnet_v2_bonded",
         )
     raise ValueError(
         f"unsupported spatial_backbone {name!r}; expected one of "

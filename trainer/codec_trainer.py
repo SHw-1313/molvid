@@ -31,6 +31,7 @@ CODEC_CONFIG_SCHEMA = "pvb.codec.config.v1"
 CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v2"
 LEGACY_CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v1"
 CODEC_MODEL_CONTRACT_SCHEMA = "pvb.codec.model_contract.v1"
+CODEC_MODEL_CONTRACT_SCHEMA_V2 = "pvb.codec.model_contract.v2"
 CODEC_DISTANCE_REFERENCE_SCHEMA = "pvb.codec.distance_reference.v1"
 PVB_MODEL_CONFIG_KEYS = (
     "hidden_channels",
@@ -44,6 +45,9 @@ PVB_MODEL_CONFIG_KEYS = (
     "vertex",
     "trainable_rbf",
     "vecnorm_type",
+    "vertex_type",
+    "rbf_type",
+    "trainable_vecnorm",
     "cutoff_lower",
     "cutoff_upper",
     "max_num_neighbors",
@@ -274,6 +278,9 @@ class PVBCodecModel(nn.Module):
         vertex: bool = True,
         trainable_rbf: bool = False,
         vecnorm_type: str | None = None,
+        vertex_type: str | None = None,
+        rbf_type: str | None = None,
+        trainable_vecnorm: bool = False,
         cutoff_lower: float = 0.0,
         cutoff_upper: float = 5.0,
         max_num_neighbors: int = 32,
@@ -334,6 +341,9 @@ class PVBCodecModel(nn.Module):
             vertex=vertex,
             trainable_rbf=trainable_rbf,
             vecnorm_type=vecnorm_type,
+            vertex_type=vertex_type,
+            rbf_type=rbf_type,
+            trainable_vecnorm=trainable_vecnorm,
             cutoff_lower=cutoff_lower,
             cutoff_upper=cutoff_upper,
             max_num_neighbors=max_num_neighbors,
@@ -376,8 +386,7 @@ class PVBCodecModel(nn.Module):
             time_scale_ps=time_scale_ps,
             spatial_refiner=refiner,
         )
-        self._constructor_config = json_safe(
-            {
+        constructor_config: dict[str, Any] = {
                 "hidden_channels": int(hidden_channels),
                 "spatial_layers": int(spatial_layers),
                 "spatial_backbone": str(spatial_backbone),
@@ -404,8 +413,21 @@ class PVBCodecModel(nn.Module):
                 "distance_bond_cache_capacity": int(distance_bond_cache_capacity),
                 "spatial_execution": spatial_execution_config,
                 "spatial_dtype": str(spatial_dtype).replace("torch.", ""),
-            }
-        )
+        }
+        if str(spatial_backbone).lower() in {
+            "visnet_v2_radius",
+            "visnet_v2_bonded",
+        }:
+            constructor_config.update(
+                {
+                    "vertex_type": self.frame_encoder.vertex_type,
+                    "rbf_type": self.frame_encoder.rbf_type,
+                    "trainable_vecnorm": bool(
+                        self.frame_encoder.trainable_vecnorm
+                    ),
+                }
+            )
+        self._constructor_config = json_safe(constructor_config)
         self._distance_reference_contract: dict[str, Any] | None = None
 
     def model_contract(self) -> dict[str, Any]:
@@ -429,24 +451,60 @@ class PVBCodecModel(nn.Module):
             "distance_bond_cache_capacity": constructor["distance_bond_cache_capacity"],
             "spatial_execution": constructor["spatial_execution"],
         }
+        is_v2 = constructor["spatial_backbone"] in {
+            "visnet_v2_radius",
+            "visnet_v2_bonded",
+        }
+        if is_v2:
+            spatial_architecture = {
+                "backbone": constructor["spatial_backbone"],
+                "hidden_channels": constructor["hidden_channels"],
+                "layers": constructor["spatial_layers"],
+                "num_rbf": constructor["num_rbf"],
+                "num_heads": constructor["num_heads"],
+                "lmax": constructor["lmax"],
+                "vertex": constructor["vertex"],
+                "vertex_type": constructor["vertex_type"],
+                "rbf_type": constructor["rbf_type"],
+                "trainable_rbf": constructor["trainable_rbf"],
+                "vecnorm_type": constructor["vecnorm_type"],
+                "trainable_vecnorm": constructor["trainable_vecnorm"],
+                "dtype": constructor["spatial_dtype"],
+                "spatial_refiner": constructor["use_spatial_refiner"],
+                "representation": "AI2BMD ViSNet ViS-MP",
+                "reference_provenance": {
+                    "primary_commit": "497efaa190ee6f6cbc6030710c44208a01ece52d",
+                    "cross_check_commit": "79d33965a40b7fa83616a9f598a0f8619f25d939",
+                },
+                "internal_vector_components": 3
+                if constructor["lmax"] == 1
+                else 8,
+                "public_vector_components": 3,
+            }
+        else:
+            spatial_architecture = {
+                "backbone": constructor["spatial_backbone"],
+                "hidden_channels": constructor["hidden_channels"],
+                "layers": constructor["spatial_layers"],
+                "num_rbf": constructor["num_rbf"],
+                "num_heads": constructor["num_heads"],
+                "lmax": constructor["lmax"],
+                "vertex": constructor["vertex"],
+                "trainable_rbf": constructor["trainable_rbf"],
+                "vecnorm_type": constructor["vecnorm_type"],
+                "dtype": constructor["spatial_dtype"],
+                "spatial_refiner": constructor["use_spatial_refiner"],
+            }
         return {
-            "schema_version": CODEC_MODEL_CONTRACT_SCHEMA,
+            "schema_version": (
+                CODEC_MODEL_CONTRACT_SCHEMA_V2
+                if is_v2
+                else CODEC_MODEL_CONTRACT_SCHEMA
+            ),
             "model_type": "trainer.codec_trainer.PVBCodecModel",
             "constructor": constructor,
             "architecture": {
-                "spatial": {
-                    "backbone": constructor["spatial_backbone"],
-                    "hidden_channels": constructor["hidden_channels"],
-                    "layers": constructor["spatial_layers"],
-                    "num_rbf": constructor["num_rbf"],
-                    "num_heads": constructor["num_heads"],
-                    "lmax": constructor["lmax"],
-                    "vertex": constructor["vertex"],
-                    "trainable_rbf": constructor["trainable_rbf"],
-                    "vecnorm_type": constructor["vecnorm_type"],
-                    "dtype": constructor["spatial_dtype"],
-                    "spatial_refiner": constructor["use_spatial_refiner"],
-                },
+                "spatial": spatial_architecture,
                 "temporal": {
                     "hidden_channels": constructor["hidden_channels"],
                     "layers": constructor["temporal_layers"],
@@ -465,9 +523,13 @@ class PVBCodecModel(nn.Module):
 
     @classmethod
     def from_model_contract(cls, contract: Mapping[str, Any]) -> "PVBCodecModel":
-        if str(contract.get("schema_version", "")) != CODEC_MODEL_CONTRACT_SCHEMA:
+        schema = str(contract.get("schema_version", ""))
+        if schema not in {
+            CODEC_MODEL_CONTRACT_SCHEMA,
+            CODEC_MODEL_CONTRACT_SCHEMA_V2,
+        }:
             raise ValueError(
-                f"unsupported PVB model contract; expected {CODEC_MODEL_CONTRACT_SCHEMA!r}"
+                "unsupported PVB model contract; expected v1 or v2 schema"
             )
         if str(contract.get("model_type", "")) != "trainer.codec_trainer.PVBCodecModel":
             raise ValueError("checkpoint model contract is not for PVBCodecModel")
@@ -1166,6 +1228,7 @@ __all__ = [
     "CODEC_CONFIG_SCHEMA",
     "CODEC_DISTANCE_REFERENCE_SCHEMA",
     "CODEC_MODEL_CONTRACT_SCHEMA",
+    "CODEC_MODEL_CONTRACT_SCHEMA_V2",
     "LEGACY_CODEC_CHECKPOINT_SCHEMA",
     "PVB_MODEL_CONFIG_KEYS",
     "CodecTrainConfig",
