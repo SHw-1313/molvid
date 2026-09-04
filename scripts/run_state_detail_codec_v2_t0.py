@@ -13,6 +13,7 @@ import gc
 import hashlib
 import json
 import math
+import os
 import random
 import time
 from datetime import datetime
@@ -25,14 +26,21 @@ import torch
 from data.clip_batching import make_clip_dataloader
 from data.clip_dataset import ClipMMapDataset, collate_clip_records
 from evaluation.codec_evaluation import (
+    ALIGNED_RMSD_NAME,
+    CONTACT_CUTOFF_ANGSTROM,
+    CONTACT_EXCLUSION_RULE,
+    RAW_RMSD_NAME,
+    _aligned_rmsd,
     _clash_rate,
-    _contact_error,
     _drmsd,
     _frequency_retention,
     _mask,
     _mean_records,
     _metrics,
     _rmsd,
+    aligned_rmsf_metrics,
+    contact_metrics,
+    dynamic_acf_metrics,
 )
 from trainer.codec_losses import CodecLossWeights, compute_codec_losses
 from trainer.codec_trainer import (
@@ -246,6 +254,8 @@ def _runtime(device: torch.device) -> dict[str, Any]:
     properties = torch.cuda.get_device_properties(device)
     return {
         "device": str(device),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "all"),
+        "physical_device_mapping": os.environ.get("CUDA_VISIBLE_DEVICES", "all"),
         "gpu": properties.name,
         "total_memory_bytes": int(properties.total_memory),
         "torch": torch.__version__,
@@ -319,7 +329,12 @@ def _records_for_micro(dataset: ClipMMapDataset) -> list[dict[str, Any]]:
     return records
 
 
-def _make_model(mode: str, *, freeze_frame_encoder: bool = True) -> PVBCodecModel:
+def _make_model(
+    mode: str,
+    *,
+    freeze_frame_encoder: bool = True,
+    coordinate_stem: str = "centered_vector",
+) -> PVBCodecModel:
     if mode not in MODES:
         raise ValueError(f"unsupported T0 mode: {mode}")
     checkpoint_hash = _sha256(FRAME_ENCODER_CHECKPOINT)
@@ -341,6 +356,7 @@ def _make_model(mode: str, *, freeze_frame_encoder: bool = True) -> PVBCodecMode
         frame_encoder_checkpoint=FRAME_ENCODER_CHECKPOINT,
         freeze_frame_encoder=freeze_frame_encoder,
         frame_encoder_source_hash=checkpoint_hash,
+        coordinate_stem=coordinate_stem,
     )
 
 
@@ -405,64 +421,12 @@ def _single_proxy(batch: Any, sample_index: int, start: int, stop: int) -> dict[
         "frame_mask": batch.frame_mask[sample_index : sample_index + 1],
         "abid": torch.zeros(stop - start, device=batch.x.device, dtype=torch.long),
         "loss_mask": batch.loss_mask[start:stop],
+        "align_mask": batch.align_mask[start:stop],
         "bond_index": bonds,
         "time_ps": batch.time_ps[sample_index : sample_index + 1],
         "delta_time_ps": batch.delta_time_ps[sample_index : sample_index + 1],
         "time_bucket_id": (str(batch.time_bucket_id[sample_index]),),
         "task": batch.task[sample_index : sample_index + 1],
-    }
-
-
-def _safe_correlation(first: torch.Tensor, second: torch.Tensor) -> float:
-    if first.numel() == 0 or second.numel() == 0:
-        return 0.0
-    first = first - first.mean()
-    second = second - second.mean()
-    denominator = torch.linalg.vector_norm(first) * torch.linalg.vector_norm(second)
-    if float(denominator) <= 1.0e-12:
-        return 1.0 if torch.allclose(first, second) else 0.0
-    return float((first * second).sum().detach().cpu() / denominator)
-
-
-def _rmsf_metrics(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> dict[str, float]:
-    pred_values: list[torch.Tensor] = []
-    target_values: list[torch.Tensor] = []
-    for atom in range(prediction.shape[1]):
-        valid = mask[:, atom]
-        if not torch.any(valid):
-            continue
-        pred_atom = prediction[valid, atom]
-        target_atom = target[valid, atom]
-        pred_values.append(torch.linalg.vector_norm(pred_atom - pred_atom.mean(0), dim=-1).square().mean().sqrt())
-        target_values.append(torch.linalg.vector_norm(target_atom - target_atom.mean(0), dim=-1).square().mean().sqrt())
-    if not pred_values:
-        return {"prediction": 0.0, "target": 0.0, "absolute_error": 0.0}
-    pred_mean = torch.stack(pred_values).mean()
-    target_mean = torch.stack(target_values).mean()
-    rmsf_correlation = _safe_correlation(
-        torch.stack(pred_values), torch.stack(target_values)
-    )
-    return {
-        "prediction": float(pred_mean.detach().cpu()),
-        "target": float(target_mean.detach().cpu()),
-        "absolute_error": float((pred_mean - target_mean).abs().detach().cpu()),
-        "correlation": rmsf_correlation,
-    }
-
-
-def _lag1_metrics(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> dict[str, float]:
-    valid = mask[:-1] & mask[1:]
-    pred_first = prediction[:-1][valid]
-    pred_second = prediction[1:][valid]
-    target_first = target[:-1][valid]
-    target_second = target[1:][valid]
-    return {
-        "prediction": _safe_correlation(pred_first, pred_second),
-        "target": _safe_correlation(target_first, target_second),
-        "absolute_error": abs(
-            _safe_correlation(pred_first, pred_second)
-            - _safe_correlation(target_first, target_second)
-        ),
     }
 
 
@@ -506,26 +470,32 @@ def _extended_metrics(
     mask = _mask(batch, prediction.shape[0], prediction.device)
     per_frame: dict[str, dict[str, float]] = {}
     for frame in range(prediction.shape[0]):
+        contacts = contact_metrics(prediction, target, batch, mask, [frame])
+        raw_rmsd = _rmsd(prediction, target, mask, [frame])
         per_frame[f"frame_{frame:02d}"] = {
-            "rmsd": _rmsd(prediction, target, mask, [frame]),
+            "legacy_raw_rmsd": raw_rmsd,
+            "aligned_rmsd": _aligned_rmsd(prediction, target, batch, mask, [frame]),
+            "centroid_gauge_raw_rmsd": raw_rmsd,
             "drmsd": _drmsd(prediction, target, mask, [frame]),
-            "contact_error": _contact_error(
-                prediction, target, batch, mask, [frame]
-            ),
+            "contact_error": contacts["contact_occupancy_mae"],
+            **contacts,
             "clash_rate": _clash_rate(prediction, batch, mask, [frame]),
         }
     offsets: dict[str, dict[str, float]] = {}
     for offset in range(ratio):
         frames = [frame for frame in range(prediction.shape[0]) if frame % ratio == offset]
+        raw_rmsd = _rmsd(prediction, target, mask, frames)
         offsets[f"offset_{offset}"] = {
-            "rmsd": _rmsd(prediction, target, mask, frames),
+            "legacy_raw_rmsd": raw_rmsd,
+            "aligned_rmsd": _aligned_rmsd(prediction, target, batch, mask, frames),
+            "centroid_gauge_raw_rmsd": raw_rmsd,
             "drmsd": _drmsd(prediction, target, mask, frames),
         }
     return {
         "per_frame": per_frame,
         "block_offsets": offsets,
-        "rmsf": _rmsf_metrics(prediction, target, mask),
-        "lag1_acf": _lag1_metrics(prediction, target, mask),
+        "rmsf": aligned_rmsf_metrics(prediction, target, batch, mask),
+        "lag1_acf": dynamic_acf_metrics(prediction, target, batch, mask),
         "frequency_retention": _frequency_retention(prediction, target, mask),
         "block_boundary_jump": _boundary_metrics(prediction, target, mask, ratio),
     }
@@ -537,6 +507,10 @@ def _nested_mean(values: Sequence[Any]) -> Any:
     first = values[0]
     if first is None:
         return None
+    if isinstance(first, (str, bool)):
+        if any(value != first for value in values[1:]):
+            raise ValueError("cannot average inconsistent non-numeric evaluation metadata")
+        return first
     if isinstance(first, Mapping):
         keys = tuple(first)
         return {key: _nested_mean([value[key] for value in values]) for key in keys}
@@ -739,18 +713,33 @@ def _runtime_profile(model: PVBCodecModel, batch: Any) -> dict[str, Any]:
 
 def _gradient_summary(model: PVBCodecModel) -> dict[str, Any]:
     codec = model.state_detail_codec
-    if codec is None:
+    modules: dict[str, torch.nn.Module] = {}
+    coordinate_stem = getattr(model, "coordinate_vector_stem", None)
+    if coordinate_stem is not None:
+        modules["coordinate_vector_stem"] = coordinate_stem
+    if codec is not None:
+        modules["state_detail_codec"] = codec
+    if not modules:
         return {"parameter_count": 0, "all_finite_nonzero": False, "parameters": {}}
     parameters: dict[str, float | None] = {}
-    for name, parameter in codec.named_parameters():
-        if parameter.grad is None:
-            parameters[name] = None
-        else:
-            parameters[name] = float(parameter.grad.detach().float().abs().sum().cpu())
+    module_parameter_counts: dict[str, int] = {}
+    for module_name, module in modules.items():
+        module_parameter_counts[module_name] = sum(
+            parameter.numel() for parameter in module.parameters()
+        )
+        for name, parameter in module.named_parameters():
+            parameter_name = f"{module_name}.{name}"
+            if parameter.grad is None:
+                parameters[parameter_name] = None
+            else:
+                parameters[parameter_name] = float(
+                    parameter.grad.detach().float().abs().sum().cpu()
+                )
     nonzero = [value for value in parameters.values() if value is not None and value > 0]
     finite = all(value is None or math.isfinite(value) for value in parameters.values())
     return {
-        "parameter_count": sum(parameter.numel() for parameter in codec.parameters()),
+        "parameter_count": sum(module_parameter_counts.values()),
+        "module_parameter_counts": module_parameter_counts,
         "parameters": parameters,
         "all_finite_nonzero": bool(finite and len(nonzero) == len(parameters)),
     }
@@ -1252,7 +1241,7 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
             f"{runtime['train_tokens_per_s'] / 1000.0:.1f}k tok/s | "
             f"e2e {runtime['end_to_end_seconds']:.3f} s/batch | "
             f"peak {runtime['peak_allocated_memory_bytes'] / 2**30:.1f} GiB | "
-            f"params {result['parameter_count']:,}"
+            f"params {result['parameter_count']:,}/{result['trainable_parameter_count']:,} trainable"
         )
     axes[0].set_title("T0 training total loss")
     axes[0].set_xlabel("optimizer step")
@@ -1266,20 +1255,25 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
     figure.text(0.5, 0.01, "\n".join(performance_text), ha="center", va="bottom", fontsize=8, family="monospace")
     save(figure, "loss_curves", rect=(0.0, 0.10, 1.0, 0.96))
 
-    figure, axes = plt.subplots(2, 3, figsize=(16, 10))
+    figure, axes = plt.subplots(2, 4, figsize=(20, 10))
     metric_specs = (
+        ("Future aligned RMSD", lambda value: value["metrics"]["future"]["aligned_rmsd"]),
+        ("Future centroid-gauge raw RMSD", lambda value: value["metrics"]["future"]["centroid_gauge_raw_rmsd"]),
         ("Future dRMSD", lambda value: value["metrics"]["future"]["drmsd"]),
-        ("Future RMSD", lambda value: value["metrics"]["future"]["rmsd"]),
         ("Future bond RMSE", lambda value: value["metrics"]["future"]["bond_rmse"]),
+        ("Contact F1 (final detailed eval)", lambda value: value["extended_metrics"]["per_frame"]["frame_01"]["contact_f1"] if value.get("extended_metrics") else float("nan")),
         ("Velocity RMSE", lambda value: value["metrics"]["velocity_rmse"]),
         ("Acceleration RMSE", lambda value: value["metrics"]["acceleration_rmse"]),
-        ("Frequency retention", lambda value: value["metrics"]["frequency_retention"]),
+        ("Frequency power ratio", lambda value: value["metrics"]["frequency_retention"]),
     )
     for axis, (title, value_fn) in zip(axes.ravel(), metric_specs):
         for mode, result in results.items():
+            values = [value_fn(row["holdout_evaluation"]) for row in result["epoch_metrics"]]
+            if all(not math.isfinite(float(value)) for value in values):
+                continue
             axis.plot(
                 [row["epoch"] for row in result["epoch_metrics"]],
-                [value_fn(row["holdout_evaluation"]) for row in result["epoch_metrics"]],
+                values,
                 color=colors[mode],
                 marker="o",
                 markersize=2,
@@ -1288,25 +1282,27 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
         axis.set_title(title)
         axis.set_xlabel("epoch")
         axis.grid(alpha=0.25)
-    axes[0, 0].set_ylabel("dRMSD")
-    axes[0, 1].set_ylabel("RMSD")
-    axes[0, 2].set_ylabel("RMSE")
-    axes[1, 0].set_ylabel("RMSE")
-    axes[1, 1].set_ylabel("RMSE")
-    axes[1, 2].set_ylabel("ratio")
+    axes[0, 0].set_ylabel("Å")
+    axes[0, 1].set_ylabel("Å")
+    axes[0, 2].set_ylabel("Å")
+    axes[0, 3].set_ylabel("Å")
+    axes[1, 0].set_ylabel("F1")
+    axes[1, 1].set_ylabel("Å/ps")
+    axes[1, 2].set_ylabel("Å/ps²")
+    axes[1, 3].set_ylabel("predicted / target power")
     axes[0, 0].legend(fontsize=8)
     figure.suptitle("T0 holdout quality curves", fontsize=15)
     figure.text(0.5, 0.01, "\n".join(performance_text), ha="center", va="bottom", fontsize=8, family="monospace")
     save(figure, "evaluation_curves", rect=(0.0, 0.10, 1.0, 0.94))
 
-    figure, axes = plt.subplots(2, 2, figsize=(14, 10))
+    figure, axes = plt.subplots(2, 3, figsize=(18, 10))
     for mode, result in results.items():
         final_extended = result["final_holdout"]["extended_metrics"]
         offsets = final_extended["block_offsets"]
         labels = list(offsets)
         axes[0, 0].plot(
             labels,
-            [offsets[label]["rmsd"] for label in labels],
+            [offsets[label]["aligned_rmsd"] for label in labels],
             marker="o",
             color=colors[mode],
             label=mode,
@@ -1324,16 +1320,29 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
             boundary["absolute_error"],
             color=colors[mode],
         )
+        final_metrics = result["final_holdout"]["metrics"]["future"]
+        axes[0, 2].bar(
+            mode,
+            final_metrics["contact_f1"],
+            color=colors[mode],
+        )
         detail = result["final_holdout"]["detail_summary"]
         axes[1, 1].bar(
             mode,
             detail.get("encoded_detail_h_norm", 0.0) or 0.0,
             color=colors[mode],
         )
-    axes[0, 0].set_title("Final per-block-offset RMSD")
+        axes[1, 2].bar(
+            mode,
+            final_extended["lag1_acf"]["dynamic_correlation"],
+            color=colors[mode],
+        )
+    axes[0, 0].set_title("Final per-block-offset aligned RMSD")
     axes[0, 1].set_title("Final per-block-offset dRMSD")
+    axes[0, 2].set_title("Final future contact F1")
     axes[1, 0].set_title("Block-boundary jump absolute error")
     axes[1, 1].set_title("Encoded detail norm")
+    axes[1, 2].set_title("Final dynamic correlation")
     axes[1, 0].tick_params(axis="x", rotation=25)
     axes[1, 1].tick_params(axis="x", rotation=25)
     axes[0, 0].legend(fontsize=8)
@@ -1406,15 +1415,27 @@ def _write_reports(
                 "mode": mode,
                 "ratio": result["ratio"],
                 "active_feature_volume_per_atom": result["model_contract"]["architecture"]["temporal"].get("active_feature_volume_per_atom"),
+                "pooling_semantics": result["model_contract"]["architecture"]["temporal"].get("pooling_semantics"),
                 "parameter_count": result["parameter_count"],
                 "trainable_parameter_count": result["trainable_parameter_count"],
-                "final_future_rmsd": final["metrics"]["future"]["rmsd"],
+                "final_future_aligned_rmsd": final["metrics"]["future"]["aligned_rmsd"],
+                "final_future_centroid_gauge_raw_rmsd": final["metrics"]["future"]["centroid_gauge_raw_rmsd"],
                 "final_future_drmsd": final["metrics"]["future"]["drmsd"],
                 "final_future_bond_rmse": final["metrics"]["future"]["bond_rmse"],
+                "final_future_contact_precision": final["metrics"]["future"]["contact_precision"],
+                "final_future_contact_recall": final["metrics"]["future"]["contact_recall"],
+                "final_future_contact_f1": final["metrics"]["future"]["contact_f1"],
+                "final_future_contact_jaccard": final["metrics"]["future"]["contact_jaccard"],
                 "final_velocity_rmse": final["metrics"]["velocity_rmse"],
                 "final_acceleration_rmse": final["metrics"]["acceleration_rmse"],
-                "final_frequency_retention": final["metrics"]["frequency_retention"],
+                "final_dynamic_correlation": final["extended_metrics"]["lag1_acf"]["dynamic_correlation"],
+                "final_dynamic_acf_prediction": final["extended_metrics"]["lag1_acf"]["prediction"],
+                "final_dynamic_acf_target": final["extended_metrics"]["lag1_acf"]["target"],
                 "final_rmsf_correlation": final["extended_metrics"]["rmsf"]["correlation"],
+                "final_frequency_power_ratio": final["metrics"]["frequency_retention"],
+                "final_boundary_jump_prediction": final["extended_metrics"]["block_boundary_jump"]["prediction"],
+                "final_boundary_jump_target": final["extended_metrics"]["block_boundary_jump"]["target"],
+                "final_boundary_jump_absolute_error": final["extended_metrics"]["block_boundary_jump"]["absolute_error"],
                 "final_detail_norm": final["detail_summary"].get("encoded_detail_h_norm"),
                 "training_elapsed_s": result["runtime"]["training_elapsed_s"],
                 "train_tokens_per_s": result["runtime"]["train_tokens_per_s"],
@@ -1445,7 +1466,7 @@ def _write_reports(
         ],
     }
     with (run_dir / "aggregate_comparison.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     _write_json(run_dir / "aggregate_comparison.json", report)
@@ -1456,17 +1477,19 @@ def _write_reports(
         "",
         "The four controls use the same frozen TorchMD frame encoder, exact 441/117 lazy split, FP32 losses, and one seed.",
         "",
-        "| Mode | Ratio | Active elements/atom | Params | Trainable | Future RMSD | Future dRMSD | Bond RMSE | Velocity RMSE | Accel RMSE | RMSF corr | Frequency | Detail norm | Train min | Tok/s | E2E s/batch | Peak GiB |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Mode | Ratio | Active elements/atom | Params | Trainable | Aligned RMSD | Centroid-gauge raw RMSD | dRMSD | Bond RMSE | Contact F1 | Velocity RMSE | Accel RMSE | Dynamic corr | RMSF corr | Frequency power ratio | Detail norm | Train min | Tok/s | E2E s/batch | Peak GiB |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['mode']} | {row['ratio']} | {row['active_feature_volume_per_atom']} | "
             f"{row['parameter_count']:,} | {row['trainable_parameter_count']:,} | "
-            f"{row['final_future_rmsd']:.6g} | {row['final_future_drmsd']:.6g} | "
-            f"{row['final_future_bond_rmse']:.6g} | {row['final_velocity_rmse']:.6g} | "
-            f"{row['final_acceleration_rmse']:.6g} | {row['final_rmsf_correlation']:.6g} | "
-            f"{row['final_frequency_retention']:.6g} | "
+            f"{row['final_future_aligned_rmsd']:.6g} | "
+            f"{row['final_future_centroid_gauge_raw_rmsd']:.6g} | "
+            f"{row['final_future_drmsd']:.6g} | {row['final_future_bond_rmse']:.6g} | "
+            f"{row['final_future_contact_f1']:.6g} | {row['final_velocity_rmse']:.6g} | "
+            f"{row['final_acceleration_rmse']:.6g} | {row['final_dynamic_correlation']:.6g} | "
+            f"{row['final_rmsf_correlation']:.6g} | {row['final_frequency_power_ratio']:.6g} | "
             f"{row['final_detail_norm'] if row['final_detail_norm'] is not None else 'n/a'} | "
             f"{row['training_elapsed_s'] / 60.0:.2f} | {row['train_tokens_per_s']:.1f} | "
             f"{row['end_to_end_seconds']:.3f} | {row['peak_allocated_memory_bytes'] / 2**30:.2f} |"
@@ -1479,6 +1502,9 @@ def _write_reports(
             f"- Manifest: {manifest['train_count']} train / {manifest['late_holdout_count']} late holdout, intersection={manifest['intersection_count']}, T={manifest['frames_per_clip']}, {manifest['time_bucket_id']}.",
             f"- Loader: lazy mmap, replacement=false, exact epoch coverage, FP32, max_tokens={MAX_TOKENS}, 30 complete epochs, safety cap={SAFETY_CAP} steps.",
             f"- Seed={SEED}; spatial_backbone=torchmd_et; common frozen frame state={FRAME_ENCODER_CHECKPOINT}.",
+            "- Coordinate reconstruction: shared centered-vector stem (centered_vector) and shared framewise equivariant decoder; no per-atom x0 anchor.",
+            f"- Evaluator: {ALIGNED_RMSD_NAME}=per-frame Kabsch on align_mask scored on loss_mask; {RAW_RMSD_NAME}=direct centroid-gauge coordinate RMSD; contacts use cutoff={CONTACT_CUTOFF_ANGSTROM:g} Å with rule={CONTACT_EXCLUSION_RULE}; dynamic correlation uses mean-removed Kabsch-aligned frame-to-frame velocity.",
+            "- ratio4_matched_pooling is linear two-bank pooling and is latent-volume-matched, not parameter-matched; its trainable parameter count is reported separately.",
             "- Loss schedule is resolved after the loader length is frozen: 0%-10% coordinate/local/bond; 10%-30% adds velocity; 30%-100% adds acceleration.",
             "",
             "## Evidence paths",
@@ -1547,6 +1573,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "temporal_layers": 1,
         "block_local": True,
         "cross_block_temporal_attention": False,
+        "coordinate_stem": "centered_vector",
+        "coordinate_decoder": "shared_framewise_equivariant",
+        "matched_pooling_semantics": "linear_two_bank_pooling",
+        "evaluator": {
+            "aligned_rmsd": "per-frame Kabsch using align_mask; RMSD over loss_mask",
+            "raw_rmsd": "centroid_gauge_raw_rmsd; direct coordinate difference",
+            "contact_cutoff_angstrom": CONTACT_CUTOFF_ANGSTROM,
+            "contact_exclusion_rule": CONTACT_EXCLUSION_RULE,
+            "dynamic_signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+            "dynamic_units": "angstrom_per_ps",
+            "dynamic_mean_removed": True,
+            "rmsf_alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+            "rmsf_aggregation": "sample_equal_mean",
+            "frequency_metric": "predicted_over_target_nonzero_temporal_power",
+            "frequency_values_above_one": "excessive_predicted_motion",
+        },
         "loss_schedule_resolved_after_loader_length": True,
     }
     _write_json(run_dir / "protocol.json", protocol)

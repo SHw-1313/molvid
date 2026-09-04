@@ -17,6 +17,7 @@ from torch import Tensor, nn
 
 
 STATE_DETAIL_CODEC_SCHEMA = "pvb.codec.state_detail.latent.v2"
+STATIC_TOPOLOGY_SCHEMA = "pvb.codec.state_detail.static_topology.v1"
 STATE_DETAIL_MODES = (
     "ratio1_state_detail",
     "ratio2_state_detail",
@@ -518,6 +519,186 @@ def center_coordinates(
     return x - atom_origin.unsqueeze(0), origin
 
 
+@dataclass(frozen=True)
+class StaticTopologyMetadata:
+    """Coordinate-independent topology aligned to the latent ``[N, ...]`` atom axis.
+
+    This deliberately does not mirror :class:`FrameGraphBatch`: radius edges, edge vectors,
+    distances, positions, and frame-expanded indices are spatial-runtime data and are not valid
+    latent metadata.  ``covalent_bond_type`` is currently a binary indicator because the clip
+    schema stores covalent connectivity without a bond-order field.
+    """
+
+    atom_type: Tensor
+    block_type: Tensor
+    abid: Tensor
+    block_id: Tensor
+    component_id: Tensor
+    atom_ptr: Tensor
+    covalent_bond_index: Tensor
+    covalent_bond_type: Tensor
+    topology_id: tuple[str, ...] = ()
+    sample_id: tuple[str, ...] = ()
+    schema_version: str = STATIC_TOPOLOGY_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != STATIC_TOPOLOGY_SCHEMA:
+            raise ValueError(f"unsupported static topology schema {self.schema_version!r}")
+        vectors = {
+            "atom_type": self.atom_type,
+            "block_type": self.block_type,
+            "abid": self.abid,
+            "block_id": self.block_id,
+            "component_id": self.component_id,
+        }
+        for name, value in vectors.items():
+            if not isinstance(value, Tensor) or value.ndim != 1:
+                raise ValueError(f"{name} must have shape [N]")
+        atom_count = int(self.atom_type.numel())
+        if any(int(value.numel()) != atom_count for value in vectors.values()):
+            raise ValueError("static topology atom fields must share the latent N axis")
+        if not isinstance(self.atom_ptr, Tensor) or self.atom_ptr.ndim != 1:
+            raise ValueError("atom_ptr must have shape [B+1]")
+        if self.atom_ptr.numel() < 2:
+            raise ValueError("atom_ptr must describe at least one sample")
+        if self.atom_ptr.device != self.abid.device:
+            raise ValueError("static topology tensors must share a device")
+        atom_ptr = self.atom_ptr.to(dtype=torch.long)
+        if int(atom_ptr[0]) != 0 or int(atom_ptr[-1]) != atom_count:
+            raise ValueError("atom_ptr must start at zero and end at N")
+        if torch.any(atom_ptr[1:] < atom_ptr[:-1]):
+            raise ValueError("atom_ptr must be nondecreasing")
+        batch_size = int(atom_ptr.numel() - 1)
+        if self.abid.numel() and (
+            torch.any(self.abid < 0) or torch.any(self.abid >= batch_size)
+        ):
+            raise ValueError("static topology abid contains an invalid sample id")
+        if not isinstance(self.covalent_bond_index, Tensor):
+            raise ValueError("covalent_bond_index must be a tensor")
+        if self.covalent_bond_index.ndim != 2 or self.covalent_bond_index.shape[0] != 2:
+            raise ValueError("covalent_bond_index must have shape [2, E_static]")
+        if self.covalent_bond_index.device != self.abid.device:
+            raise ValueError("covalent bond metadata must share the latent device")
+        edge_count = int(self.covalent_bond_index.shape[1])
+        if not isinstance(self.covalent_bond_type, Tensor) or self.covalent_bond_type.shape != (edge_count,):
+            raise ValueError("covalent_bond_type must have shape [E_static]")
+        if self.covalent_bond_type.device != self.abid.device:
+            raise ValueError("covalent bond types must share the latent device")
+        if edge_count:
+            edge_index = self.covalent_bond_index.to(dtype=torch.long)
+            if torch.any(edge_index < 0) or torch.any(edge_index >= atom_count):
+                raise ValueError("covalent bond index exceeds the latent N atom axis")
+            if torch.any(self.abid.index_select(0, edge_index[0]) != self.abid.index_select(0, edge_index[1])):
+                raise ValueError("static topology contains a cross-sample covalent bond")
+        if self.topology_id and len(self.topology_id) != batch_size:
+            raise ValueError("topology_id must contain one entry per latent sample")
+        if self.sample_id and len(self.sample_id) != batch_size:
+            raise ValueError("sample_id must contain one entry per latent sample")
+
+    @property
+    def num_atoms(self) -> int:
+        return int(self.atom_type.numel())
+
+    @property
+    def batch_size(self) -> int:
+        return int(self.atom_ptr.numel() - 1)
+
+    @property
+    def z(self) -> Tensor:
+        return self.atom_type
+
+    @property
+    def b(self) -> Tensor:
+        return self.block_type
+
+    @property
+    def bond_index(self) -> Tensor:
+        return self.covalent_bond_index
+
+    @classmethod
+    def from_batch(cls, batch: Any) -> "StaticTopologyMetadata":
+        """Extract only static chemical fields from a ``ClipBatch``-like object."""
+
+        def field(name: str) -> Any:
+            if isinstance(batch, Mapping):
+                if name not in batch:
+                    raise ValueError(f"batch is missing static topology field {name!r}")
+                return batch[name]
+            if not hasattr(batch, name):
+                raise ValueError(f"batch is missing static topology field {name!r}")
+            return getattr(batch, name)
+
+        atom_type = torch.as_tensor(field("atype"), dtype=torch.long)
+        block_type = torch.as_tensor(field("btype"), device=atom_type.device, dtype=torch.long)
+        abid = torch.as_tensor(field("abid"), device=atom_type.device, dtype=torch.long).flatten()
+        block_id = torch.as_tensor(field("block_id"), device=atom_type.device, dtype=torch.long).flatten()
+        component_id = torch.as_tensor(field("component_id"), device=atom_type.device, dtype=torch.long).flatten()
+        atom_ptr = torch.as_tensor(field("atom_ptr"), device=atom_type.device, dtype=torch.long).flatten()
+        bond_index = torch.as_tensor(field("bond_index"), device=atom_type.device, dtype=torch.long)
+        if bond_index.numel() == 0:
+            bond_index = torch.empty((2, 0), device=atom_type.device, dtype=torch.long)
+        elif bond_index.ndim != 2 or bond_index.shape[0] != 2:
+            raise ValueError("bond_index must have shape [2, E_static]")
+        bond_type = torch.ones(
+            (int(bond_index.shape[1]),), device=atom_type.device, dtype=torch.long
+        )
+        if isinstance(batch, Mapping):
+            topology_values = batch.get("topology_id", ())
+            sample_values = batch.get("sample_id", ())
+        else:
+            topology_values = getattr(batch, "topology_id", ())
+            sample_values = getattr(batch, "sample_id", ())
+        topology_id = tuple(str(value) for value in topology_values)
+        sample_id = tuple(str(value) for value in sample_values)
+        return cls(
+            atom_type=atom_type,
+            block_type=block_type,
+            abid=abid,
+            block_id=block_id,
+            component_id=component_id,
+            atom_ptr=atom_ptr,
+            covalent_bond_index=bond_index,
+            covalent_bond_type=bond_type,
+            topology_id=topology_id,
+            sample_id=sample_id,
+        )
+
+    def to(self, device: torch.device | str, *, non_blocking: bool = False) -> "StaticTopologyMetadata":
+        return replace(
+            self,
+            atom_type=self.atom_type.to(device, non_blocking=non_blocking),
+            block_type=self.block_type.to(device, non_blocking=non_blocking),
+            abid=self.abid.to(device, non_blocking=non_blocking),
+            block_id=self.block_id.to(device, non_blocking=non_blocking),
+            component_id=self.component_id.to(device, non_blocking=non_blocking),
+            atom_ptr=self.atom_ptr.to(device, non_blocking=non_blocking),
+            covalent_bond_index=self.covalent_bond_index.to(device, non_blocking=non_blocking),
+            covalent_bond_type=self.covalent_bond_type.to(device, non_blocking=non_blocking),
+        )
+
+    def contract(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "atom_count": self.num_atoms,
+            "batch_size": self.batch_size,
+            "atom_type_shape": list(self.atom_type.shape),
+            "block_type_shape": list(self.block_type.shape),
+            "abid_shape": list(self.abid.shape),
+            "block_id_shape": list(self.block_id.shape),
+            "component_id_shape": list(self.component_id.shape),
+            "atom_ptr_shape": list(self.atom_ptr.shape),
+            "covalent_bond_index_shape": list(self.covalent_bond_index.shape),
+            "covalent_bond_type_shape": list(self.covalent_bond_type.shape),
+            "bond_index_space": "latent_atom_axis_N",
+            "bond_encoding": "binary_covalent_connectivity",
+            "coordinate_independent": True,
+            "frame_invariant": True,
+            "contains_radius_edges": False,
+            "contains_distance_or_edge_vectors": False,
+            "contains_target_coordinates": False,
+        }
+
+
 @dataclass
 class StateDetailLatent:
     """Versioned structured latent for the R1/R2/R4 state/detail controls."""
@@ -569,6 +750,11 @@ class StateDetailLatent:
         return {"state": self.width} | ({"detail": self.width} if self.detail_h is not None else {})
 
     def contract(self) -> dict[str, Any]:
+        topology_contract = (
+            self.topology.contract()
+            if isinstance(self.topology, StaticTopologyMetadata)
+            else None
+        )
         return {
             "schema_version": self.schema_version,
             "mode": self.mode,
@@ -592,6 +778,7 @@ class StateDetailLatent:
             "origin_rule": self.origin_rule,
             "has_per_atom_anchor": False,
             "has_target_coordinates": False,
+            "topology": topology_contract,
         }
 
 
@@ -625,6 +812,11 @@ class MatchedPoolingLatent:
         return int(self.tokens * self.width * 2)
 
     def contract(self) -> dict[str, Any]:
+        topology_contract = (
+            self.topology.contract()
+            if isinstance(self.topology, StaticTopologyMetadata)
+            else None
+        )
         return {
             "schema_version": self.schema_version,
             "mode": self.mode,
@@ -648,6 +840,8 @@ class MatchedPoolingLatent:
             "has_per_atom_anchor": False,
             "has_target_coordinates": False,
             "state_detail_semantics": False,
+            "pooling_semantics": "linear_two_bank_pooling",
+            "topology": topology_contract,
         }
 
 
@@ -682,6 +876,29 @@ class _EquivariantCoordinateHead(nn.Module):
             raise ValueError("coordinate head expects h=[T,N,C] and v=[T,N,3,C]")
         gate = torch.sigmoid(self.gate(h)).unsqueeze(2)
         return self.out(v * gate).squeeze(-1).float()
+
+
+class CenteredCoordinateVectorStem(nn.Module):
+    """Inject centered coordinates into generated equivariant vector features.
+
+    This is part of the learned latent path, not coordinate metadata.  The
+    map is bias-free and acts independently on the Cartesian components, so a
+    translation removed by ``center_coordinates`` cannot re-enter the vector
+    representation as an extra origin or time-dependent displacement.
+    """
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        if int(channels) < 1:
+            raise ValueError("channels must be positive")
+        self.channels = int(channels)
+        self.projection = nn.Linear(1, self.channels, bias=False)
+        nn.init.ones_(self.projection.weight)
+
+    def forward(self, centered_coordinates: Tensor) -> Tensor:
+        if centered_coordinates.ndim != 3 or centered_coordinates.shape[-1] != 3:
+            raise ValueError("centered coordinates must have shape [T, N, 3]")
+        return self.projection(centered_coordinates.unsqueeze(-1))
 
 
 def _frame_mask_for_atoms(latent: StateDetailLatent | MatchedPoolingLatent) -> Tensor:
@@ -956,7 +1173,7 @@ class StateDetailCodecV2(nn.Module):
 
 
 class MatchedPoolingCodecV2(nn.Module):
-    """R4 two-bank unstructured capacity control."""
+    """R4 two-bank unstructured linear pooling capacity control."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
@@ -1099,6 +1316,7 @@ StateDetailLatentV2 = StateDetailLatent
 
 
 __all__ = [
+    "CenteredCoordinateVectorStem",
     "HaarLift",
     "MatchedPoolingCodec",
     "MatchedPoolingCodecV2",
@@ -1112,6 +1330,8 @@ __all__ = [
     "StateDetailDecoderOutput",
     "StateDetailLatent",
     "StateDetailLatentV2",
+    "STATIC_TOPOLOGY_SCHEMA",
+    "StaticTopologyMetadata",
     "center_coordinates",
     "compute_masked_centroid_origin",
     "haar_inverse",

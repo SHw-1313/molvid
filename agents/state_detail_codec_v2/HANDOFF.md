@@ -343,3 +343,133 @@ Include:
 - Stop rule: `S300`–`S303` remain blocked. No T1 manifest, T1 training, static/dynamic large-data
   run, DiT, observation adapter, forecasting, rollout, AF3/MSA, VAE/KL/VQ, scaling-law, or
   later architecture phase began. The worker stops here for operator review.
+
+### 2026-09-04 — R200-R202 repair Stage 0 audit and protocol freeze
+
+- Status: repair phase opened; no repair source implementation, GPU training, T0 repeat, or T1
+  work has started. The operator decision supplied for this phase is
+  `REQUEST_FIX_AND_REPEAT_T0`; it is a repair request, not a rejection of the accepted Haar/
+  state-detail packing.
+- Repository audit: actual checkout is `/data4/users/sihao/workspace/PVB`; remote is
+  `https://github.com/SHw-1313/molvid.git`; source branch is `feat/state-detail-codec-v2`; source
+  HEAD is `48bbff992e66cc5f351911e23f31750325ef3726`; source parent is
+  `045dbb8809e9d7aee418eb355b6477e05088d4fd`; the pre-repair worktree was clean. The repair
+  branch `fix/state-detail-codec-v2-t1-gates` was created directly from that verified HEAD.
+- Pre-repair source/document SHA256 baseline recorded before the repair edits: `AGENTS.md`=
+  `ef8cd7b9b131a761cb6f7cafb5c4fbd462125169baac829f1a7646e11cbc95ff`;
+  `config/codec.yaml`=`afaa9b3e1c4990b5a44a18aa5e302e9e6f739fe472ca917a17db5e3318428bc3`;
+  `module/__init__.py`=`7f673d31bd12d72d01a8b3621058bab13eaec8f3c412ff12ca3a4f2801b5db3d`;
+  `module/state_detail_codec_v2.py`=`8b3aa07d5562c9ef7c8107401606a6cf9d2e25e0ce9ffb9e0a7224e00f17b209`;
+  `trainer/codec_trainer.py`=`ba3d49b79a6467021aaa0706a2439e8b864177e59c59e449a82f8e9a28ed18ae`;
+  `scripts/run_state_detail_codec_v2_t0.py`=`1c45c47106cfc40823e0130f4c520273c41f2a2633438fef9c3cac193157291c`;
+  `tests/test_state_detail_codec_v2.py`=`2f50ad7b4b2610edff65224f03a5f084d4818685339abe1b0a03f94403181300`.
+  The approved phase document hashes were also recorded: `PLAN.md`=
+  `d2f3758006cca7d52b0bd67cbc89e7de9f9cff4a1e610e8fcece928f1e5141cc`, `DECISIONS.md`=
+  `04f9d06ea7bf41ca030113af002a92c3653c48a217921bf237328e5246a665f9`, `ACCEPTANCE.md`=
+  `02d7aee6f94514a1ea6653d7e4bd55486b17c3aa8825b046dc2ac5be391ea2ed`, `TASKS.md`=
+  `5b06a39cc84f26bf5eb10d9766db8becdf11c05feef03fae2de774b444bf8614`.
+- Required read order completed: root `AGENTS.md`, every file under
+  `agents/state_detail_codec_v2/` including `PLAN.md`, `DECISIONS.md`, `ACCEPTANCE.md`,
+  `TASKS.md`, `OPERATOR_REVIEW.md`, `HANDOFF.md`, and `worker.toml`; prior v1/v2 history and
+  the supplied repair prompt were already read in the preceding phase context.
+- Headline T0 reproduction from the committed JSON, using `enter-container`/`torch-ito`, is:
+  R1 future RMSD/dRMSD/bond RMSE `11.424228/10.154870/3.083183`; R2
+  `11.241862/9.900528/3.122913`; R4-SD `11.138619/9.767301/3.107002`; matched pooling
+  `10.544774/9.306050/3.344215`. This confirms the operator’s concern that R1 is not yet a
+  meaningful no-compression upper bound; the old values are retained as historical evidence.
+- Existing T0 evidence verified present under
+  `outputs/state_detail_codec_v2/t0_remote_final/run_20260903T213807/`, including aggregate
+  reports, plots, per-control logs/evaluations/checkpoints, manifest contract, and frozen
+  encoder evidence. No historical v1/v2 file or artifact was overwritten.
+- Repair planning records: the append-only repair addendum was added to `PLAN.md`, repair
+  decisions D17-D23 were appended to `DECISIONS.md`, and R200-R260 were appended to `TASKS.md`.
+  Root `AGENTS.md` now routes work to this repair branch and requires the same container,
+  `torchmd_et`-only scope, and mandatory `WAITING_FOR_OPERATOR_REVIEW` stop.
+- Immediate next task: R210/R211 static topology metadata and tests, followed by R220/R221
+  evaluator semantics. The cached single-clip diagnostic and reconstruction repair must precede
+  any R2/R4 smoke or T0 repeat. If bounded no-anchor repair cannot make R1 decodable, stop with
+  the exact blocker and do not launch a larger run.
+
+### 2026-09-04 — R210-R231 topology/evaluator repair and cached R1 diagnostic
+
+- Static topology repair: new state/detail latents now carry `StaticTopologyMetadata` extracted
+  from the input `ClipBatch`, with atom/block/component fields and binary covalent connectivity
+  on the latent N axis.  It does not carry `FrameGraphBatch` radius edges, positions, distances,
+  edge vectors, frame-expanded indices, or target coordinates.  Legacy `_decode_encoded` remains
+  unchanged for the old checkpoint schema.
+- Reconstruction diagnostic command (container `torch-ito`):
+  `python -m scripts.run_state_detail_codec_v2_r1_diagnostic --output-dir
+  outputs/state_detail_codec_v2/repair/r1_cached_feature_diagnostic/run_20260904T_stage2b`.
+  It used exactly one real sample, `atlas_5e3e_A_R1_w000000`, with frozen `torchmd_et` and
+  cached h/v shapes `[16,887,128]` and `[16,887,3,128]`, plus the centered target.  The initial
+  pointwise path was aligned RMSD `13.652314` Å; a detached 500-step pointwise optimization
+  reached `5.526837` Å; the linear equivariant vector oracle reached `7.392781` Å; origin-only
+  aligned RMSD was `13.701599` Å.  This shows partial coordinate information in frozen vectors
+  and a substantial pointwise decoder limitation, while not passing the formal repaired R1 gate.
+  The first diagnostic execution had a script device-placement failure and produced no result;
+  it is not a scientific run.  The stage2b execution completed and is the retained diagnostic.
+- Evaluator repair: schema is `pvb.codec.eval.v2`; `aligned_rmsd` uses frame-wise Kabsch on
+  `align_mask`, `centroid_gauge_raw_rmsd` is the direct legacy/raw metric, contacts retain pair
+  identity with precision/recall/F1/Jaccard/FP/FN/occupancy-MAE, dynamic ACF uses per-trajectory
+  Kabsch-aligned frame-to-frame velocity in Å/ps, and RMSF is aligned to each trajectory's own
+  first frame with sample-equal aggregation.  Duplicate covalent bond rows are de-duplicated in
+  pair denominators after the diagnostic exposed an old >1 FPR artifact.
+- Focused verification: through `enter-container` with `torch-ito`,
+  `python -m pytest -q tests/test_codec_evaluation.py tests/test_state_detail_codec_v2.py`
+  completed with 28 passed before the final explicit longer-T topology assertion; that assertion
+  was then added and the focused suite is rerun before the formal R1 gate.  `python -m py_compile`
+  passed for the repaired modules, T0 runner, and diagnostic script.  The formal single-clip
+  threshold was frozen in D24 before repaired training results are inspected.
+- Implementation choice: `CenteredCoordinateVectorStem` is bias-free, initialized at one, and
+  injects centered coordinates into the learned vector latent before Haar packing for R1/R2/R4/
+  matched.  Repaired contracts are v4; explicit old v3 state/detail contracts load with
+  `coordinate_stem=none` and preserve their old semantics.  A truthful linear-two-bank matched
+  pooling name remains the contract; no scalar-gated behavior was claimed.
+- Next gate: run the formal one-clip R1 overfit with the frozen thresholds, curves, checkpoint
+  resume, and stem/codec gradients.  The formal budget is frozen at 1,000 steps with a 25-step
+  metric log interval (D25).  R2/R4 smoke and repeated T0 remain forbidden until it passes.
+
+### 2026-09-04 — R230 corrected cached diagnostic, R240 R1 gate, and R241 ratio smoke
+
+- The earlier stage2b diagnostic is superseded for evaluator evidence because it was produced
+  before the duplicate-covalent-pair denominator correction.  The corrected authoritative
+  diagnostic is `outputs/state_detail_codec_v2/repair/r1_cached_feature_diagnostic/run_20260904T_stage2c/`.
+  Its cached feature file has SHA256
+  `6e122621df08c6447c0906a8114c1ffe174fc5c41f35f36c22e28578fc6f8506`; shapes are frozen
+  `h=[16,887,128]`, `v=[16,887,3,128]`, centered target `[16,887,3]`.
+- Corrected diagnostic results for the one real clip `atlas_5e3e_A_R1_w000000` were: current
+  no-stem pointwise initial aligned/raw RMSD `13.652314/13.798742` Å, detached 500-step
+  pointwise final aligned/raw/dRMSD/bond `5.524466/5.615697/4.559049/2.675140` Å, linear
+  vector oracle aligned/raw/dRMSD/bond `7.392781/7.466507/6.587139/3.116368` Å, and
+  origin-only aligned RMSD `13.701599` Å.  The diagnostic gradient summary was finite and
+  nonzero.  This supports the pointwise-decoder hypothesis and does not constitute production
+  training evidence.
+- The formal R1 gate was frozen before repaired training in D24/D25:
+  `aligned_rmsd<=1.5`, `centroid_gauge_raw_rmsd<=1.5`, `dRMSD<=1.5`, `bond_rmse<=0.5`,
+  origin-only aligned improvement `>=0.5`, finite curves, and a converged final window.
+  The genuine one-sample command used exactly 1,000 steps and logged every 25 steps:
+  `python -m scripts.run_state_detail_codec_v2_r1_single_clip --output-dir
+  outputs/state_detail_codec_v2/repair/r1_single_clip/run_20260904T_stage2c`.
+- R240 passed at `outputs/state_detail_codec_v2/repair/r1_single_clip/run_20260904T_stage2c/`.
+  Final all-frame aligned/raw/dRMSD/bond were `0.084951/0.085038/0.111515/0.024777` Å;
+  future aligned/raw/dRMSD/bond were `0.085115/0.085196/0.111787/0.024745` Å; origin-only
+  aligned improvement was `0.993800`; all intended stem/codec gradients were finite and
+  nonzero; the frozen encoder was unchanged; checkpoint resume `1000 -> 1001` passed.
+  The final checkpoint SHA256 is
+  `5654bb4c37fa51976421cf4a23420fb536cc49106bbd04afa95d5dd4b8ae1dd0`; result JSON SHA256 is
+  `921df11a11c4418b18c61d42785b7b0793df99f7c80fbb08528bf6174d652ea1`.
+- R241 then ran the bounded 200-step smoke on the same single clip for
+  `ratio2_state_detail`, `ratio4_state_detail`, and `ratio4_matched_pooling`:
+  `python -m scripts.run_state_detail_codec_v2_ratio_smoke --output-dir
+  outputs/state_detail_codec_v2/repair/ratio_smoke/run_20260904T_stage3`.  The summary status
+  is `passed` and `t1_started=false`.  Final aligned/raw/dRMSD/bond/contact-F1 were respectively
+  R2 `0.066825/0.067810/0.055249/0.040102/0.981242`, R4-SD
+  `0.072682/0.073069/0.059461/0.041076/0.981053`, and matched
+  `0.193294/0.193816/0.223682/0.079457/0.960623`; each control had finite nonzero new-module
+  gradients, unchanged frozen encoder, and checkpoint resume `200 -> 201`.
+  Summary SHA256 is `d01d56bf0dd6387640837764d9176375f49bcb48e601ccb0754f23987327b7a0`.
+- The focused repair suite remains `28 passed`; repaired modules and scripts pass `py_compile`.
+  The T0 report generator now emits aligned/raw names, pair-aware contact fields, dynamic
+  correlation semantics, matched-pooling semantics, and LF-normalized CSV output.  The exact
+  three-system T0 repeat is the next authorized repair task; no T1 manifest or later phase has
+  been created or started.

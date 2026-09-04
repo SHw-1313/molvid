@@ -59,6 +59,7 @@ from .coordinate_decoder import (
     CoordinateDecoder,
 )
 from .state_detail_codec_v2 import (
+    CenteredCoordinateVectorStem,
     HaarLift,
     MatchedPoolingCodec,
     MatchedPoolingCodecV2,
@@ -67,6 +68,8 @@ from .state_detail_codec_v2 import (
     RATIO_FOR_MODE,
     STATE_DETAIL_CODEC_SCHEMA,
     STATE_DETAIL_MODES,
+    STATIC_TOPOLOGY_SCHEMA,
+    StaticTopologyMetadata,
     StateDetailCodec,
     StateDetailCodecV2,
     StateDetailDecoderOutput,

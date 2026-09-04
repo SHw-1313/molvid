@@ -8,7 +8,10 @@ import torch
 
 from data.clip_dataset import collate_clip_records
 from module.state_detail_codec_v2 import (
+    CenteredCoordinateVectorStem,
     MatchedPoolingCodecV2,
+    STATIC_TOPOLOGY_SCHEMA,
+    StaticTopologyMetadata,
     StateDetailCodecV2,
     center_coordinates,
     haar_inverse,
@@ -205,7 +208,25 @@ def test_zero_detail_is_unchanged_by_clock_and_dynamic_detail_is_used():
     assert moving.detail_v.abs().sum() > 0
 
 
-def test_static_t1_detail_invalid_and_irregular_clock():
+def test_static_t1_is_genuinely_one_frame_and_detail_invalid():
+    h, v = _features(frames=1)
+    codec = StateDetailCodecV2(5, mode="ratio4_state_detail")
+    latent = codec.encode(
+        h,
+        v,
+        time_ps=torch.tensor([[123.0]]),
+        frame_mask=torch.ones(1, 1, dtype=torch.bool),
+        abid=torch.zeros(3, dtype=torch.long),
+        sample_origin=torch.zeros(1, 3),
+    )
+    assert latent.frames == 1
+    assert latent.detail_valid.shape == (1, 1)
+    assert not bool(latent.detail_valid.any())
+    assert torch.equal(latent.frame_time_ps, torch.tensor([[123.0]]))
+    assert latent.contract()["detail_valid_shape"] == [1, 1]
+
+
+def test_two_frame_partial_r4_discards_the_incomplete_detail_bank_explicitly():
     h, v = _features(frames=2)
     codec = StateDetailCodecV2(5, mode="ratio4_state_detail")
     latent = codec.encode(
@@ -220,12 +241,26 @@ def test_static_t1_detail_invalid_and_irregular_clock():
     assert not bool(latent.detail_valid.any())
     assert torch.equal(latent.frame_time_ps, torch.tensor([[123.0, 223.0]]))
     assert torch.equal(latent.block_time_ps[0, 0, :2], torch.tensor([123.0, 223.0]))
+
+
+def test_irregular_clock_is_separate_from_static_and_partial_block_policy():
+    h, v = _features(frames=4)
+    codec = StateDetailCodecV2(5, mode="ratio4_state_detail")
+    latent = codec.encode(
+        h,
+        v,
+        time_ps=torch.tensor([[1.0, 2.0, 4.0, 7.0]]),
+        frame_mask=torch.ones(1, 4, dtype=torch.bool),
+        abid=torch.zeros(3, dtype=torch.long),
+        sample_origin=torch.zeros(1, 3),
+    )
+    assert torch.equal(latent.frame_time_ps, torch.tensor([[1.0, 2.0, 4.0, 7.0]]))
     with pytest.raises(ValueError, match="strictly increasing"):
         codec.encode(
             h,
             v,
-            time_ps=torch.tensor([[1.0, 1.0]]),
-            frame_mask=torch.ones(1, 2, dtype=torch.bool),
+            time_ps=torch.tensor([[1.0, 1.0, 2.0, 3.0]]),
+            frame_mask=torch.ones(1, 4, dtype=torch.bool),
             abid=torch.zeros(3, dtype=torch.long),
             sample_origin=torch.zeros(1, 3),
         )
@@ -397,7 +432,9 @@ def test_model_contract_roundtrip_and_public_decoder_has_no_target_argument():
         neighbor_backend="dense_test",
     )
     contract = model.model_contract()
-    assert contract["schema_version"] == "pvb.codec.model_contract.v3"
+    assert contract["schema_version"] == "pvb.codec.model_contract.v4"
+    assert contract["constructor"]["coordinate_stem"] == "centered_vector"
+    assert contract["architecture"]["decoder"]["coordinate_stem"] == "centered_vector"
     assert contract["architecture"]["decoder"]["per_atom_anchor"] is False
     assert contract["architecture"]["temporal"]["cross_block_attention"] is False
     restored = PVBCodecModel.from_model_contract(contract)
@@ -410,6 +447,105 @@ def test_model_contract_roundtrip_and_public_decoder_has_no_target_argument():
     output = model(batch)
     assert output.x_hat.shape == batch.x.shape
     assert output.latent.sample_origin.shape == (1, 3)
+
+
+def test_old_v3_state_detail_contract_loads_without_a_coordinate_stem():
+    model = PVBCodecModel(
+        hidden_channels=8,
+        spatial_layers=1,
+        temporal_layers=1,
+        temporal_codec_mode="ratio2_state_detail",
+        coordinate_stem="none",
+        num_rbf=4,
+        num_heads=2,
+        max_num_neighbors=4,
+        neighbor_backend="dense_test",
+    )
+    contract = model.model_contract()
+    assert contract["schema_version"] == "pvb.codec.model_contract.v3"
+    assert "coordinate_stem" not in contract["constructor"]
+    assert PVBCodecModel.from_model_contract(contract).model_contract() == contract
+
+
+def test_static_topology_is_n_axis_coordinate_independent_and_radius_free():
+    batch = collate_clip_records([_record()])
+    topology = StaticTopologyMetadata.from_batch(batch)
+    assert topology.schema_version == STATIC_TOPOLOGY_SCHEMA
+    assert topology.num_atoms == batch.atom_count == 2
+    assert topology.covalent_bond_index.numel() == 2
+    assert int(topology.covalent_bond_index.max()) < topology.num_atoms
+    assert topology.covalent_bond_index.shape[0] == 2
+    contract = topology.contract()
+    assert contract["bond_index_space"] == "latent_atom_axis_N"
+    assert contract["contains_radius_edges"] is False
+    assert contract["contains_distance_or_edge_vectors"] is False
+    assert contract["contains_target_coordinates"] is False
+
+    changed = replace(
+        batch,
+        x=batch.x + torch.arange(batch.frames, dtype=batch.x.dtype).view(-1, 1, 1) * 17.0,
+        bpos=batch.bpos + 91.0,
+    )
+    changed_topology = StaticTopologyMetadata.from_batch(changed)
+    for field in (
+        "atom_type",
+        "block_type",
+        "abid",
+        "block_id",
+        "component_id",
+        "atom_ptr",
+        "covalent_bond_index",
+        "covalent_bond_type",
+    ):
+        assert torch.equal(getattr(topology, field), getattr(changed_topology, field))
+    assert topology.contract() == changed_topology.contract()
+
+    longer = replace(
+        batch,
+        x=batch.x[:1].repeat(16, 1, 1),
+        bpos=batch.bpos[:1].repeat(16, 1, 1),
+        frame_mask=torch.ones(1, 16, dtype=torch.bool),
+        time_ps=torch.arange(16, dtype=torch.float32).view(1, 16) * 100.0,
+        delta_time_ps=torch.full((1, 15), 100.0),
+    )
+    longer_topology = StaticTopologyMetadata.from_batch(longer)
+    assert longer_topology.num_atoms == topology.num_atoms
+    assert longer_topology.covalent_bond_index.shape == topology.covalent_bond_index.shape
+    assert longer_topology.contract() == topology.contract()
+
+    model = PVBCodecModel(
+        hidden_channels=8,
+        spatial_layers=1,
+        temporal_layers=1,
+        temporal_codec_mode="ratio2_state_detail",
+        num_rbf=4,
+        num_heads=2,
+        max_num_neighbors=4,
+        neighbor_backend="dense_test",
+    )
+    model.prepare_batch(batch)
+    latent = model.encode(batch)
+    assert isinstance(latent.topology, StaticTopologyMetadata)
+    assert not any(
+        hasattr(latent.topology, forbidden)
+        for forbidden in (
+            "pos",
+            "edge_vec",
+            "edge_weight",
+            "distance_edge_index",
+            "distance_edge_vec",
+        )
+    )
+    assert latent.contract()["topology"]["atom_count"] == batch.atom_count
+
+
+def test_centered_coordinate_vector_stem_is_equivariant_and_zero_preserving():
+    stem = CenteredCoordinateVectorStem(5)
+    coordinates = torch.randn(4, 3, 3)
+    output = stem(coordinates)
+    assert output.shape == (4, 3, 3, 5)
+    assert torch.equal(stem(torch.zeros_like(coordinates)), torch.zeros_like(output))
+    assert stem.projection.bias is None
 
 
 def test_decoder_isolated_from_target_mutation_after_encoding():

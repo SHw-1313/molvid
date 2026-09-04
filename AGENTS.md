@@ -2,7 +2,7 @@
 
 ## Active implementation phase
 
-The active phase is **zero-preserving state/detail temporal codec v2**.
+The active phase is **state/detail codec v2 T1-gates repair and bounded T0 repeat**.
 
 Before editing code, read the preceding phase documents as immutable historical context, then
 the current prompt and new phase documents in this order:
@@ -12,7 +12,7 @@ the current prompt and new phase documents in this order:
 2. v2 files: `agents/visnet_spatial_v2/PLAN.md`, `DECISIONS.md`, `ACCEPTANCE.md`,
    `REFERENCE_PARITY.md`, `TASKS.md`, and `HANDOFF.md`;
 3. `LUNA_REVIEW_FIX_PROMPT_260903.md`;
-4. `agents/state_detail_codec_v2/PLAN.md`;
+4. `agents/state_detail_codec_v2/PLAN.md` and its appended T1-gates repair addendum;
 5. `agents/state_detail_codec_v2/DECISIONS.md`;
 6. `agents/state_detail_codec_v2/ACCEPTANCE.md`;
 7. `agents/state_detail_codec_v2/TASKS.md`;
@@ -27,8 +27,8 @@ not be overwritten or repurposed.
 
 ## Repository and environment rules
 
-- Work on `feat/state-detail-codec-v2`, based on `feat/visnet-spatial-v2` commit
-  `045dbb8809e9d7aee418eb355b6477e05088d4fd`.
+- Work on `fix/state-detail-codec-v2-t1-gates`, based on source commit
+  `48bbff992e66cc5f351911e23f31750325ef3726` from `feat/state-detail-codec-v2`.
 - Run all Python, tests, fixture generation, training, evaluation, and plotting only through
   `enter-container` with the `torch-ito` conda environment.
 - New experiments use `spatial_backbone=torchmd_et`; ViSNet v1/v2 backends remain compatible,
@@ -41,10 +41,11 @@ not be overwritten or repurposed.
 
 ## Scope discipline
 
-This phase implements and evaluates only the deterministic zero-preserving state/detail temporal
-codec, its contracts/tests, and the bounded three-system/nine-trajectory T0. Every new run uses
-the existing `torchmd_et` frame encoder. Keep ViSNet v1/v2 backends, contracts, checkpoints, and
-result files unchanged and reproducible.
+This repair phase addresses coordinate-independent latent topology metadata, no-anchor coordinate
+reconstruction, evaluator correctness, true single-clip evidence, and a bounded repeat of the
+three-system/nine-trajectory T0. It preserves the accepted deterministic zero-preserving
+state/detail algebra and uses the existing `torchmd_et` frame encoder. Keep ViSNet v1/v2 and
+state/detail v2 historical contracts, checkpoints, reports, and result files reproducible.
 
 Do not create a T1 manifest or run T1, static/dynamic large-data training, DiT, observation
 adapter, forecasting, rollout, AF3/MSA conditioning, VAE/KL/VQ, scaling-law, full-data, or any
@@ -55,13 +56,15 @@ later architecture work. After the T0 operator review packet is complete, set ph
 
 - `AGENTS.md`: this required S201 transition is authorized; otherwise preserve it.
 - v1/v2 phase files and artifacts: read-only historical evidence; never rewrite them.
-- `agents/state_detail_codec_v2/PLAN.md` and `ACCEPTANCE.md`: read-only.
+- `agents/state_detail_codec_v2/PLAN.md` and `ACCEPTANCE.md`: the approved original text is
+  immutable; append only the repair addendum required by the active repair prompt to `PLAN.md`.
 - `agents/state_detail_codec_v2/DECISIONS.md`: append only when an implementation fact forces a
   real new decision; never rewrite prior decisions.
 - `agents/state_detail_codec_v2/TASKS.md`: update task status and attach concise evidence.
 - `agents/state_detail_codec_v2/HANDOFF.md`: append dated commands, tests, outputs, blockers,
   metrics, and next task.
-- `agents/state_detail_codec_v2/OPERATOR_REVIEW.md`: fill only with observed evidence after T0.
+- `agents/state_detail_codec_v2/OPERATOR_REVIEW.md`: preserve the previous review as history and
+  fill the repair result section only with observed evidence after the repeated T0.
 
 Do not begin coding by rewriting the plan. Execute the prepared state/detail plan, and do not change
 acceptance thresholds to make a failing result pass.

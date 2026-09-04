@@ -127,3 +127,58 @@ Status legend: `[ ]` pending, `[-]` active, `[x]` complete, `[!]` blocked.
 
 S300–S303 remain blocked even if S200–S273 pass. Only a later explicit operator approval may
 change their status.
+
+## Repair phase — T1 gates (2026-09-04)
+
+The operator requested repair and repeat T0. The accepted Haar/state-detail algebra and the four
+control contracts remain binding. These tasks do not authorize T1.
+
+- [x] R200 audit the actual checkout, source commit, remote, branch, worktree, current contracts,
+  and prior T0 evidence — checkout is `/data4/users/sihao/workspace/PVB`, remote is
+  `https://github.com/SHw-1313/molvid.git`, source HEAD is `48bbff992e66cc5f351911e23f31750325ef3726`,
+  and the pre-repair worktree was clean.
+- [x] R201 reproduce the four operator-review headline rows and record a clean pre-repair hash
+  set — old final future RMSD/dRMSD/bond RMSE are R1 `11.424228/10.154870/3.083183`, R2
+  `11.241862/9.900528/3.122913`, R4 `11.138619/9.767301/3.107002`, matched
+  `10.544774/9.306050/3.344215`; hashes are appended to the repair handoff.
+- [x] R202 create the recommended `fix/state-detail-codec-v2-t1-gates` branch and append the
+  repair hypotheses, gates, and stop condition to the phase records — completed before source
+  implementation.
+- [x] R210 replace frame-expanded/coordinate-dependent latent topology with a validated static
+  N-axis chemical schema.
+- [x] R211 add topology metadata tests for N-axis bounds, T-invariance, coordinate/frame
+  independence, and exclusion of radius/distance/target data — static-topology and codec tests
+  pass with explicit longer-T shape invariance.
+- [x] R220 implement aligned/raw RMSD, pair-aware contacts, dynamic ACF, and explicit RMSF/
+  aggregation semantics while preserving clearly named raw legacy diagnostics.
+- [x] R221 add evaluator fixtures for rigid-transform invariance, pair identity, and temporal
+  ordering; `tests/test_codec_evaluation.py` and `tests/test_state_detail_codec_v2.py` pass
+  together (28 passed before the shape-invariance assertion, then the same focused suite is rerun).
+- [x] R230 run the required cached-feature single-clip diagnostic and freeze an operator-visible
+  R1 reconstruction threshold before inspecting repaired training results — corrected stage2c
+  cached h/v and centered target are in the diagnostic directory; threshold is recorded in D24.
+- [x] R231 implement the smallest permitted no-anchor reconstruction repair based on the diagnostic;
+  retain the shared architecture and accepted capacity/zero-motion contracts — centered-vector
+  stem is versioned in model-contract v4 and applied before all four control codecs.
+- [x] R240 run the genuine one-sample R1 overfit with the frozen 1,000-step/D24 gate, curves,
+  raw/aligned RMSD, dRMSD, bond RMSE, finite gradients, frozen encoder, and centroid/origin
+  baseline — stage2c passed all frozen thresholds; final aligned/raw/dRMSD/bond are
+  `0.084951/0.085038/0.111515/0.024777` Å and checkpoint resume `1000 -> 1001` passed.
+- [x] R241 run bounded single-clip R2, R4-SD, and matched-pooling smoke only after R1 passes —
+  stage3 passed for all three controls with zero-preserving detail, finite/nonzero gradients,
+  unchanged frozen encoder, shared decoder contract, and checkpoint resume.
+- [x] R250 repeat the exact three-system/nine-trajectory T0 only after all earlier repair gates
+  pass; the authoritative run is
+  `outputs/state_detail_codec_v2/repair/t0_repeat/run_20260904T122210`, using the canonical
+  441/117 store, FP32, seed `20260903`, frozen `torchmd_et`, and all four controls for 30
+  complete epochs/4,976 steps. No data, split, precision, backbone, or control definition was
+  changed; the physical GPU mapping was recorded as `CUDA_VISIBLE_DEVICES=1`.
+- [x] R260 generate the repaired reports/checkpoints, fill the new operator packet, append all
+  hashes/commands/limitations, set `WAITING_FOR_OPERATOR_REVIEW`, and stop. The packet and
+  aggregate reports are in the same run directory; external binaries/plots are present and
+  hash-checked on this machine, while the scoped output directory is Git-ignored. No T1 work
+  was started.
+
+R210–R260 must not create a T1 manifest, select T1 systems, benchmark T1, or begin any later
+architecture/data/training phase. If the frozen-feature/no-anchor combination remains undecodable
+after the bounded repair, mark the repair blocked with exact evidence and stop without T0 repeat.

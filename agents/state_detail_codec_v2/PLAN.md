@@ -376,3 +376,58 @@ target <=18–20 GPU hours per control
 With two GPUs, run two waves; with four, one control per GPU. Selection uses validation only and
 test is evaluated after configuration/stopping rules are frozen. T1 requires a later explicit
 operator prompt.
+
+## 21. Repair addendum — T1 gates (2026-09-04)
+
+The operator review requested a repair-and-repeat-T0 cycle. The accepted Haar/state-detail
+algebra, four control names, deterministic AE objective, `torchmd_et` backend, and no-anchor
+constraint remain binding. This addendum does not authorize T1.
+
+### Repair hypotheses
+
+1. The latent topology field is currently frame-expanded and coordinate-dependent; replacing it
+   with a validated static N-axis chemical schema will remove a future information leak without
+   changing the current decoder.
+2. The frozen TorchMD vector features plus a pointwise coordinate head may not contain enough
+   centered coordinate information. A cached single-clip diagnostic must separate feature
+   insufficiency from decoder insufficiency before selecting a bounded repair.
+3. A learned centered-coordinate equivariant vector stem is the smallest permitted repair. If it
+   cannot pass the declared single-clip R1 reconstruction gate, a bounded generated-latent global
+   decoder may be evaluated; no fixed per-atom coordinate anchor may return.
+4. Several evaluator labels are currently scientifically inaccurate: raw coordinate error is not
+   aligned RMSD, contact-count difference loses pair identity, absolute-coordinate ACF is mostly
+   static shape, and clip-wise RMSF/aggregation semantics are underspecified.
+
+### Repair gates
+
+- Static topology metadata is N-axis, coordinate-independent, T-invariant, and excludes radius
+  edges, distances, vectors, frame-expanded arrays, and target coordinates.
+- Aligned RMSD, centroid-gauge raw RMSD, pair-aware contacts, dynamic ACF, and explicitly aligned
+  RMSF are implemented and fixture-tested while preserving legacy/raw names where needed.
+- A genuine one-sample single-clip R1 run reports curves and an operator-visible threshold frozen
+  before training. It must be finite, converge clearly, improve over centroid/origin-only
+  reconstruction, and exercise every intended new module with nonzero finite gradients.
+- R1/R2/R4-SD share the same reconstruction stem/global decoder and initialization policy; the
+  matched control is reported as latent-volume-matched with its natural parameter count.
+- Repeated-static zero detail/motion, genuine T=1, partial-block policy, SE(3), target isolation,
+  checkpoint/config, legacy regression, frozen encoder, and exact accepted capacity contracts
+  continue to pass.
+- A repeated T0 is allowed only after the single-clip R1 gate and ratio smoke pass. It uses the
+  same 441/117 data, seed, FP32, `torchmd_et`, frozen common encoder, four controls, and fixed
+  loss schedule; reports absolute train/holdout curves and all required evaluator/runtime
+  diagnostics.
+
+### Required order and stop condition
+
+1. Audit source state, reproduce the old headline rows, and record pre-repair hashes.
+2. Repair static topology metadata and evaluator semantics with focused tests.
+3. Run the one-clip cached-feature R1 diagnostic and then the smallest permitted reconstruction
+   repair. Stop if the no-anchor/frozen-feature combination is not decodable.
+4. Run bounded R2/R4-SD/matched smoke only after R1 passes; then repeat the exact T0 if all gates
+   remain valid.
+5. Append observed evidence to the handoff, create a new operator packet with the actual repair
+   commit and artifact paths, set `Status: WAITING_FOR_OPERATOR_REVIEW`, and stop.
+
+No T1 manifest, system selection, T1 benchmark, T1 training/evaluation, DiT, forecasting,
+observation masking, rollout, AF3/MSA, VAE/KL/VQ, static-data training, or later architecture
+phase may begin in this repair cycle.

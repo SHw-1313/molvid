@@ -92,3 +92,67 @@ does not authorize continuation.
 After approval, T1 uses 64 independent systems split 48/8/8 by system, up to three trajectories
 per system, capped resampled clips, one native time bucket, and a per-control target of 18–20 GPU
 hours. This decision records the intended design but grants no current execution authority.
+
+## Repair addendum — T1 gates (2026-09-04)
+
+### D17 — preserve the accepted codec algebra
+
+The repair does not change the four control names, block-local orthonormal Haar transforms,
+R4 coefficient order, zero-preserving detail paths, capacity definitions, deterministic AE loss,
+`torchmd_et` selection, or no-anchor constraint. Any implementation change must be justified by a
+correctness gate or the bounded R1 diagnostic.
+
+### D18 — topology metadata is static chemical metadata
+
+New latent topology is aligned to the N-atom latent axis and may contain atom/block/component
+identity and static covalent bonds only. Frame-expanded radius edges, coordinates, distances,
+edge vectors, contacts, and frame offsets are prohibited even if the current decoder ignores the
+field.
+
+### D19 — reconstruction repair is diagnostic-led
+
+Before selecting a decoder repair, cache one frozen-feature trajectory clip and compare the
+current pointwise head against a centered-coordinate vector-stem hypothesis. A vector stem is the
+preferred minimal repair; a generated-latent global context module is permitted only if the stem
+is insufficient. A fixed per-atom coordinate bypass is never permitted.
+
+### D20 — evaluator names must describe their signal
+
+New metrics distinguish Kabsch-aligned RMSD from centroid-gauge raw RMSD, preserve pair identity
+for contacts, compute lag/ACF on a rigid-body-handled dynamic signal, and state RMSF alignment and
+aggregation semantics. Existing raw metrics may remain only under explicit legacy/raw names.
+
+### D21 — genuine single-clip gate precedes T0 repeat
+
+The repair must use exactly one sample ID for the R1 overfit diagnostic, freeze the reconstruction
+threshold before observing the result, and report train curves plus raw/aligned RMSD, dRMSD, and
+bond RMSE. Percentage total-loss reduction alone cannot pass this gate. R2/R4/matched smoke and
+the three-system repeat are forbidden until the R1 gate passes.
+
+### D22 — matched pooling naming is truthful
+
+Unless the implementation is changed to scalar-gated pooling, the comparator is documented and
+reported as linear two-bank pooling. Its natural parameter count is shown and it is not used to
+select a ratio without that qualification.
+
+### D23 — mandatory repair stop
+
+The repair worker ends after the new bounded T0 review packet with `WAITING_FOR_OPERATOR_REVIEW`
+and `T1 status: NOT_STARTED`. No T1 manifest, benchmark, data selection, training, evaluation,
+or later architecture work is authorized by this repair phase.
+
+### D24 — freeze the R1 reconstruction gate before the repaired run
+
+The formal single-clip R1 gate uses `atlas_5e3e_A_R1_w000000`, T=16, FP32, frozen `torchmd_et`,
+and the no-anchor centered-origin decoder.  Its predeclared thresholds are final aligned RMSD,
+centroid-gauge raw RMSD, and dRMSD <= 1.5 Å, covalent bond RMSE <= 0.5 Å, at least 50% aligned
+RMSD improvement over origin-only prediction, finite/converged curves, unchanged frozen encoder,
+and finite nonzero gradients for every intended stem/codec parameter.  The threshold is fixed
+before inspecting the repaired run and does not authorize T1.
+
+### D25 — bound and log the formal single-clip R1 gate
+
+The repaired R1 gate runs exactly 1,000 optimizer steps on the same one-sample clip, logs
+optimizer and reconstruction metrics every 25 steps including step zero, and saves/resumes the
+final checkpoint for one additional optimizer step.  The 1,000-step budget and D24 thresholds
+are frozen before inspecting this repaired result; no ratio smoke or T0 repeat is implied.

@@ -18,10 +18,12 @@ from data.clip_dataset import ClipBatch, TASK_NAMES
 from module.coordinate_decoder import CodecLatent, JointMultiFrameDecoder, LatentConditionedSpatialRefiner
 from module.multiframe_codec import PVBFrameEncoder
 from module.state_detail_codec_v2 import (
+    CenteredCoordinateVectorStem,
     ORIGIN_RULE,
     RATIO_FOR_MODE,
     STATE_DETAIL_MODES,
     MatchedPoolingCodecV2,
+    StaticTopologyMetadata,
     StateDetailCodecV2,
     center_coordinates,
 )
@@ -42,6 +44,7 @@ LEGACY_CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v1"
 CODEC_MODEL_CONTRACT_SCHEMA = "pvb.codec.model_contract.v1"
 CODEC_MODEL_CONTRACT_SCHEMA_V2 = "pvb.codec.model_contract.v2"
 CODEC_MODEL_CONTRACT_SCHEMA_V3 = "pvb.codec.model_contract.v3"
+CODEC_MODEL_CONTRACT_SCHEMA_V4 = "pvb.codec.model_contract.v4"
 CODEC_DISTANCE_REFERENCE_SCHEMA = "pvb.codec.distance_reference.v1"
 PVB_MODEL_CONFIG_KEYS = (
     "hidden_channels",
@@ -77,6 +80,7 @@ PVB_MODEL_CONFIG_KEYS = (
     "frame_encoder_checkpoint",
     "freeze_frame_encoder",
     "frame_encoder_source_hash",
+    "coordinate_stem",
 )
 
 
@@ -314,6 +318,7 @@ class PVBCodecModel(nn.Module):
         frame_encoder_checkpoint: str | Path | None = None,
         freeze_frame_encoder: bool = False,
         frame_encoder_source_hash: str | None = None,
+        coordinate_stem: str | None = None,
     ) -> None:
         super().__init__()
         temporal_mode = str(temporal_codec_mode).lower()
@@ -322,6 +327,16 @@ class PVBCodecModel(nn.Module):
                 f"unsupported temporal_codec_mode {temporal_codec_mode!r}; expected "
                 f"'legacy' or one of {STATE_DETAIL_MODES}"
             )
+        if coordinate_stem is None:
+            resolved_coordinate_stem = "none" if temporal_mode == "legacy" else "centered_vector"
+        else:
+            resolved_coordinate_stem = str(coordinate_stem).lower()
+        if resolved_coordinate_stem not in {"none", "centered_vector"}:
+            raise ValueError(
+                "coordinate_stem must be 'none' or 'centered_vector'"
+            )
+        if temporal_mode == "legacy" and resolved_coordinate_stem != "none":
+            raise ValueError("legacy codec does not support coordinate_stem")
         if temporal_ratio is None:
             resolved_temporal_ratio = (
                 RATIO_FOR_MODE[temporal_mode] if temporal_mode != "legacy" else 1
@@ -444,6 +459,12 @@ class PVBCodecModel(nn.Module):
 
         self.temporal_codec_mode = temporal_mode
         self.temporal_ratio = resolved_temporal_ratio
+        self.coordinate_stem = resolved_coordinate_stem
+        self.coordinate_vector_stem = (
+            CenteredCoordinateVectorStem(hidden_channels)
+            if resolved_coordinate_stem == "centered_vector"
+            else None
+        )
         self.temporal_encoder = None
         self.decoder = None
         self.state_detail_codec = None
@@ -533,6 +554,8 @@ class PVBCodecModel(nn.Module):
                     "frame_encoder_source_hash": self.frame_encoder_source_hash,
                 }
             )
+            if resolved_coordinate_stem != "none":
+                constructor_config["coordinate_stem"] = resolved_coordinate_stem
         self._constructor_config = json_safe(constructor_config)
         self._distance_reference_contract: dict[str, Any] | None = None
 
@@ -562,6 +585,9 @@ class PVBCodecModel(nn.Module):
             "visnet_v2_bonded",
         }
         is_state_detail = constructor.get("temporal_codec_mode", "legacy") != "legacy"
+        is_repaired_state_detail = (
+            is_state_detail and constructor.get("coordinate_stem", "none") != "none"
+        )
         if is_v2:
             spatial_architecture = {
                 "backbone": constructor["spatial_backbone"],
@@ -635,6 +661,10 @@ class PVBCodecModel(nn.Module):
                     else 8 * constructor["hidden_channels"]
                 ),
             }
+            if is_repaired_state_detail:
+                architecture_temporal["coordinate_stem"] = constructor["coordinate_stem"]
+            if constructor["temporal_codec_mode"] == "ratio4_matched_pooling":
+                architecture_temporal["pooling_semantics"] = "linear_two_bank_pooling"
             architecture_decoder = {
                 "name": "StateDetailNoAnchorDecoder",
                 "coordinate_head": "shared_framewise_equivariant",
@@ -643,9 +673,13 @@ class PVBCodecModel(nn.Module):
                 "target_coordinates": False,
                 "spatial_refiner": False,
             }
+            if is_repaired_state_detail:
+                architecture_decoder["coordinate_stem"] = constructor["coordinate_stem"]
         return {
             "schema_version": (
-                CODEC_MODEL_CONTRACT_SCHEMA_V3
+                CODEC_MODEL_CONTRACT_SCHEMA_V4
+                if is_repaired_state_detail
+                else CODEC_MODEL_CONTRACT_SCHEMA_V3
                 if is_state_detail
                 else CODEC_MODEL_CONTRACT_SCHEMA_V2
                 if is_v2
@@ -668,9 +702,10 @@ class PVBCodecModel(nn.Module):
             CODEC_MODEL_CONTRACT_SCHEMA,
             CODEC_MODEL_CONTRACT_SCHEMA_V2,
             CODEC_MODEL_CONTRACT_SCHEMA_V3,
+            CODEC_MODEL_CONTRACT_SCHEMA_V4,
         }:
             raise ValueError(
-                "unsupported PVB model contract; expected v1, v2, or v3 schema"
+                "unsupported PVB model contract; expected v1, v2, v3, or v4 schema"
             )
         if str(contract.get("model_type", "")) != "trainer.codec_trainer.PVBCodecModel":
             raise ValueError("checkpoint model contract is not for PVBCodecModel")
@@ -678,6 +713,16 @@ class PVBCodecModel(nn.Module):
         if not isinstance(constructor, Mapping):
             raise ValueError("PVB model contract is missing its constructor mapping")
         constructor = dict(constructor)
+        if schema == CODEC_MODEL_CONTRACT_SCHEMA_V3 and str(
+            constructor.get("temporal_codec_mode", "legacy")
+        ) != "legacy":
+            # v3 state/detail checkpoints predate the learned coordinate stem.
+            # Loading them must preserve their exact no-stem semantics.
+            constructor.setdefault("coordinate_stem", "none")
+        if schema == CODEC_MODEL_CONTRACT_SCHEMA_V4 and str(
+            constructor.get("coordinate_stem", "")
+        ) != "centered_vector":
+            raise ValueError("v4 state/detail contracts require coordinate_stem='centered_vector'")
         dtype_name = str(constructor.pop("spatial_dtype", "float32"))
         try:
             spatial_dtype = getattr(torch, dtype_name)
@@ -738,23 +783,21 @@ class PVBCodecModel(nn.Module):
         raise TypeError("codec batch must be a ClipBatch or mapping")
 
     @staticmethod
-    def _topology_metadata(encoded: Any) -> dict[str, Tensor]:
-        graph = encoded.graph
-        # Deliberately omit graph.pos/edge_vec/edge_weight: a new latent may
-        # carry topology, but no per-atom coordinate reference.
-        return {
-            "z": graph.z,
-            "b": graph.b,
-            "batch": graph.batch,
-            "edge_index": graph.edge_index,
-            "bond_type": graph.bond_type,
-        }
+    def _topology_metadata(batch: ClipBatch) -> StaticTopologyMetadata:
+        """Return static N-axis chemistry, never the frame-expanded graph."""
+
+        return StaticTopologyMetadata.from_batch(batch)
 
     def _state_detail_encode(self, batch: ClipBatch):
         if self.temporal_codec_mode == "legacy":
             raise RuntimeError("state/detail encode is unavailable for the legacy codec")
         centered_batch, origin = self._centered_batch(batch)
         encoded = self.frame_encoder(centered_batch)
+        if self.coordinate_vector_stem is not None:
+            coordinate_vectors = self.coordinate_vector_stem(centered_batch.x).to(
+                dtype=encoded.v.dtype
+            )
+            encoded = replace(encoded, v=encoded.v + coordinate_vectors)
         latent = self.state_detail_codec.encode(
             encoded.h,
             encoded.v,
@@ -762,7 +805,7 @@ class PVBCodecModel(nn.Module):
             frame_mask=self._batch_field(batch, "frame_mask"),
             abid=self._batch_field(batch, "abid"),
             sample_origin=origin,
-            topology=self._topology_metadata(encoded),
+            topology=self._topology_metadata(batch),
         )
         return latent, encoded
 
@@ -1455,6 +1498,7 @@ __all__ = [
     "CODEC_MODEL_CONTRACT_SCHEMA",
     "CODEC_MODEL_CONTRACT_SCHEMA_V2",
     "CODEC_MODEL_CONTRACT_SCHEMA_V3",
+    "CODEC_MODEL_CONTRACT_SCHEMA_V4",
     "LEGACY_CODEC_CHECKPOINT_SCHEMA",
     "PVB_MODEL_CONFIG_KEYS",
     "CodecTrainConfig",
