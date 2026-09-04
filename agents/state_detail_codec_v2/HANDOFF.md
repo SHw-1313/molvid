@@ -473,3 +473,162 @@ Include:
   correlation semantics, matched-pooling semantics, and LF-normalized CSV output.  The exact
   three-system T0 repeat is the next authorized repair task; no T1 manifest or later phase has
   been created or started.
+### 2026-09-04 — R250/R260 repaired T0 repeat, final evidence, and mandatory stop
+
+Repair implementation commit: 7878df7286350b6b46cb2198d942fdcda2451ba1, based directly on
+48bbff992e66cc5f351911e23f31750325ef3726. Target branch is
+fix/state-detail-codec-v2-t1-gates; remote is https://github.com/SHw-1313/molvid.git. The
+implementation commit worktree was clean before this append. The final packet commit is the
+only subsequent documentation change and is clean after commit. No destructive Git operation
+or push was used.
+
+Changed tracked files are AGENTS.md, .gitignore, evaluation/__init__.py,
+evaluation/codec_evaluation.py, module/__init__.py, module/state_detail_codec_v2.py,
+trainer/codec_trainer.py, scripts/run_state_detail_codec_v2_t0.py,
+scripts/run_state_detail_codec_v2_r1_diagnostic.py,
+scripts/run_state_detail_codec_v2_r1_single_clip.py,
+scripts/run_state_detail_codec_v2_ratio_smoke.py, tests/test_codec_evaluation.py,
+tests/test_state_detail_codec_v2.py, and the append-only state/detail PLAN.md, DECISIONS.md,
+TASKS.md, and HANDOFF.md. OPERATOR_REVIEW.md is appended in the packet commit. Repair outputs
+are Git-ignored external evidence and remain present on this machine.
+
+Main implementation SHA256 at the repair implementation commit:
+
+~~~text
+evaluation/codec_evaluation.py                 1c7ac1b70146a933c88fdd790ff421e52eba85af3ce6bff5e1ac0437ad8ae544
+evaluation/__init__.py                          332c46b68cdff9ba80062352ba4b86aefb8f2d4a5b03d655abbb4762e5f34b28
+module/state_detail_codec_v2.py                5ff5fd0f08b772e59c0067fbcc0a3c8a3881d7e921084a92bd97d8f418080928
+module/__init__.py                             6f4f23a9966e88c8738bfc2e06120a43c9182ec8965fd6c318ac903b0f8924ef
+trainer/codec_trainer.py                        39e02bbc68858d778a533c80aabf32b5f05769f542aa3b8366de396dc5124694
+scripts/run_state_detail_codec_v2_t0.py         03211c6c94de6a9215cdbc9cfcc975ce787226731bb73b9e9d5140b162b5fd6e
+scripts/run_state_detail_codec_v2_r1_diagnostic.py dd9b162c8022b43ec1958bccea927ebfbab633729771880bfcc16edafb86c477
+scripts/run_state_detail_codec_v2_r1_single_clip.py e92b530cc4f757b4c995c71d228c7b8b497d331506c69488a594bd4c73d31d12
+scripts/run_state_detail_codec_v2_ratio_smoke.py 625588ba6d160d3cd445eba5eaf77d3718d2b0f0421a42637be6582178efab46
+tests/test_codec_evaluation.py                  eac51038968acfeb125cf89ee8539f9dc39ce277097301c579425a67c1d0a52f
+tests/test_state_detail_codec_v2.py             b76fc0001077e1fb9b4e9856ea03864e368a25fe563fbafbea7979f321b4978c
+~~~
+
+Evidence and tests:
+
+- StaticTopologyMetadata is an N-axis, coordinate-independent schema with atom/block/component
+  identifiers, pointers, and covalent pairs only. Radius edges, positions, distances, edge
+  vectors, frame-expanded indices, and target coordinates are excluded. Tests cover N-axis
+  bounds, longer-T shape invariance, coordinate independence, future-frame independence, and
+  radius/distance exclusion.
+- The evaluator adds per-frame Kabsch aligned_rmsd on align_mask and retains
+  centroid_gauge_raw_rmsd as the explicit raw metric. Contacts preserve pair identity using a
+  4.5 Å cutoff and covalent-pair exclusion. Dynamic correlation/ACF uses mean-removed,
+  Kabsch-aligned frame-to-frame velocity in Å/ps. RMSF is aligned to each trajectory's first
+  frame with sample-equal aggregation. Frequency power above one means excessive motion.
+- The no-anchor repair is a shared bias-free CenteredCoordinateVectorStem before temporal
+  packing. There is no per-atom x0 post-decoder addition. R1/R2/R4-SD share the decoder.
+  Matched pooling is linear two-bank pooling, latent-volume-matched but not parameter-matched.
+- The authoritative cached diagnostic is
+  outputs/state_detail_codec_v2/repair/r1_cached_feature_diagnostic/run_20260904T_stage2c.
+  It has one clip, h=[16,887,128], v=[16,887,3,128], centered targets [16,887,3];
+  no-stem initial aligned/raw RMSD 13.652314/13.798742 Å; detached pointwise 500-step final
+  5.524466/5.615697 Å with dRMSD/bond 4.559049/2.675140 Å; vector oracle
+  7.392781/7.466507 Å; origin-only aligned RMSD 13.701599 Å. diagnostic.json SHA256 is
+  1af48019a526fd12748b339bd544081b0210d0917557cd4070e25efda933ac19 and cached_features.pt
+  SHA256 is 6e122621df08c6447c0906a8114c1ffe174fc5c41f35f36c22e28578fc6f8506.
+- True single-clip R1 is in
+  outputs/state_detail_codec_v2/repair/r1_single_clip/run_20260904T_stage2c. It used one
+  sample, 1,000 steps, and 25-step logging. Frozen thresholds were aligned/raw RMSD <=1.5 Å,
+  dRMSD <=1.5 Å, bond <=0.5 Å, origin-only improvement >=0.5 Å, finite curve, and converged
+  final window. All passed. Final all-frame aligned/raw/dRMSD/bond =
+  0.084951/0.085038/0.111515/0.024777 Å; future =
+  0.085115/0.085196/0.111787/0.024745 Å; origin-only improvement = 0.993800 Å.
+  Gradients were finite/nonzero, encoder unchanged, and resume 1000 -> 1001 passed.
+- Ratio smoke in outputs/state_detail_codec_v2/repair/ratio_smoke/run_20260904T_stage3 used
+  200 steps for R2, R4-SD, and matched pooling on the same clip. All passed zero-preserving
+  detail, gradients, frozen encoder, shared decoder, and resume 200 -> 201. Final
+  aligned/raw/dRMSD/bond/contact-F1: R2 0.066825/0.067810/0.055249/0.040102/0.981242;
+  R4-SD 0.072682/0.073069/0.059461/0.041076/0.981053; matched
+  0.193294/0.193816/0.223682/0.079457/0.960623. Summary SHA256 is
+  d01d56bf0dd6387640837764d9176375f49bcb48e601ccb0754f23987327b7a0.
+- Focused tests: python -m pytest -q tests/test_codec_evaluation.py
+  tests/test_state_detail_codec_v2.py -> 28 passed. Full suite: python -m pytest -q ->
+  115 passed in 10.77s, with one pre-existing torch.load(weights_only=False) FutureWarning.
+  Repaired modules, scripts, and relevant tests passed py_compile. Generated JSON/CSV/Markdown/
+  JSONL output was checked for CRLF/trailing whitespace with no findings.
+- The exact committed source diff check passed:
+  git diff --check 48bbff992e66cc5f351911e23f31750325ef3726
+  7878df7286350b6b46cb2198d942fdcda2451ba1.
+
+T0 protocol and evidence:
+
+- Exact container command:
+  CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -m scripts.run_state_detail_codec_v2_t0 --mode all
+  --store-root outputs/atlas_selected_trajectories/clip_store
+  --output-root outputs/state_detail_codec_v2/repair/t0_repeat
+- Run directory:
+  outputs/state_detail_codec_v2/repair/t0_repeat/run_20260904T122210.
+  Systems are atlas_5e3e_A, atlas_1v7r_A, atlas_2wlt_A; replicas R1/R2/R3; train windows
+  w000000-w000048; holdout windows w000049-w000061; T=16; dt_100ps; lazy loading;
+  replacement=false; FP32; seed 20260903; max_tokens=80000; 30 complete epochs; cap 6000.
+  Canonical and historical portable stores matched for all 558 IDs and payload hashes. Counts
+  are 441 train, 117 holdout, zero overlap.
+- Manifest hashes: source
+  700f01e40f4e0fda697191cd161bb8161b97493a994415cee286354a9809450e; train index
+  f8a05f905f1467864993291e64008db9d26109261f4a007f11cc15fe4ae8c3f9; holdout index
+  c02d45d2cf77bfbbce787f1d8b747556d52d91e7c7de7f61baa26e6ab62a2a61; built manifest
+  01c7bcb0cc463eee0ff8afecc7dbaad211156d3793c0b017afb8549f70114a2f; manifest contract
+  e0bc84c98c5a955fe85fc5b663a34af9abe28af93860603e58a11106c754a73b.
+  protocol.json is 8c14c67b62b504c74d1ade800fd354193b89f1654214bdf192e232b27483b0a6.
+- Runtime is container cuda:0 on physical mapping CUDA_VISIBLE_DEVICES=1, NVIDIA
+  A100-SXM4-80GB, Torch 2.5.1+cu121, CUDA 12.1, and torch_cluster 1.6.3+pt25cu121.
+  Protocol records centered_vector, shared_framewise_equivariant, linear_two_bank_pooling,
+  and the corrected evaluator semantics.
+- All four controls completed 30 epochs and 4,976 scheduled steps, complete holdout
+  evaluation, best/final checkpoints, and resume 4976 -> 4977. Final future metrics:
+
+| Control | Active/atom | Total/trainable | Aligned RMSD | Raw RMSD | dRMSD | Bond | Contact F1 | Vel RMSE | Accel RMSE | Dyn corr | RMSF corr | Power ratio | Boundary error | Train s | Tok/s | E2E s/batch | Peak GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| R1-SD | 2048 | 643,144 / 82,560 | 0.105395 | 0.105435 | 0.143339 | 0.022667 | 0.986426 | 0.0001221 | 2.093e-6 | 0.999850 | 0.999968 | 1.012466 | 0.005946 | 4328.4 | 79,699 | 0.193 | 24.01 |
+| R2-SD | 2048 | 725,064 / 164,480 | 0.078981 | 0.079039 | 0.103156 | 0.022113 | 0.988454 | 8.297e-5 | 1.323e-6 | 0.999923 | 0.999977 | 1.005878 | 0.002846 | 5971.0 | 57,773 | 0.197 | 24.47 |
+| R4-SD | 1024 | 856,136 / 295,552 | 0.064856 | 0.064934 | 0.082521 | 0.021026 | 0.988925 | 7.330e-5 | 1.231e-6 | 0.999939 | 0.999983 | 1.003593 | 0.001552 | 5983.2 | 57,656 | 0.200 | 24.47 |
+| R4-Matched-Pooling | 1024 | 1,102,664 / 542,080 | 0.090435 | 0.090519 | 0.115388 | 0.028109 | 0.986176 | 0.0006986 | 1.355e-5 | 0.994320 | 0.999795 | 1.004576 | 0.005997 | 4298.5 | 80,254 | 0.193 | 24.02 |
+
+R1 is now a useful no-compression upper bound at approximately 0.105 Å and no longer fails at
+the former approximately 11 Å scale. Structure and dynamics improve together; frequency ratios
+are near one. R2 preserves 16C active capacity, R4-SD is 8C, and matched pooling is not
+parameter matched. This is bounded development evidence, not a production ratio selection.
+
+The aggregate report also contains contact precision/recall/Jaccard, per-frame/per-offset/system
+metrics, aligned RMSF, dynamic ACF, frequency, boundary, latent norms, and full/detail-zero
+counterfactuals. R2 full/detail-zero future RMSD is 0.078981/12.275951 Å and dRMSD is
+0.103156/11.230306 Å; R4-SD is 0.064856/12.166277 Å and 0.082521/11.085510 Å.
+
+Report/artifact paths are in OPERATOR_REVIEW.md and the run directory. Main hashes are:
+
+~~~text
+aggregate_comparison.json   e7d9ca83b280725dfac7a87c574eb02fb511bc75a6bde906f4a81904c95b6626
+aggregate_comparison.csv    5b93e8f1eea6eb07828d3ea64f0032c9f4bf6a0a06d404ac5bb1317ef7ce2872
+aggregate_comparison.md     db3a823b2c9cdd0e4983c328028648e23df987ebe89bb6597e0836bc713b02b1
+micro_summary.json           179b5c111ffc565a5518457d02d1238e38923b063f521a1e3b2dfef7a219a45a
+unfreeze_smoke.json          f609356e9e98bf807f9cc2f7dad81adb4417200a00776423d27b702302e21fe9
+~~~
+
+Final/best checkpoint hashes:
+
+~~~text
+R1 final 02434947a68b30b9ecf585a4ac86f5d68e653304861fad0c7b42de5b0db9113d
+R1 best  13955f92217a291df381b3ebfb9ab1450648a7083148db9c5cbe1aad8b8e763c
+R2 final e3e509b8cb5c16e7f3e9d535c47967ac5c4918cbf2ebb9fad44feb509328d9a5
+R2 best  8f00848dbe6816af22f7a97f59cf1f6dd4f4fb16c9d2e573f0726a70353e8bf0
+R4 final 5ed009cee98e62cb6f229d5a55ab2a4d0997453713879de7e56c21f2873b2e68
+R4 best  0cb07483b89c05060be03f7210ed5373cd4ef2de2ba28e4e8242e0bf5ca608ce
+MP final  b778d2532e516dab23d2e9887dec936d922a0dcbfa3d4756480644ce6803a157
+MP best   0f1528ea2837fb12422a45663d3f46f68cdfc34ee33e97bb3f7b3e4d8884d0f2
+~~~
+
+Outcome: implementation pass; evaluator/topology pass; true single-clip R1 pass; ratio smoke
+and three-clip micro-overfit pass; bounded T0 complete and finite with a meaningful R1 upper
+bound. torchmd_et remains the only development backend and no production ratio recommendation
+is made. Limitations are one seed, three systems/nine trajectories, no broad-system or
+multi-seed confirmation, and external binary artifact retention.
+
+Final phase status: WAITING_FOR_OPERATOR_REVIEW. T1 status: NOT_STARTED. No T1 manifest,
+64-system split, T1 benchmark/training, static/dynamic large-data work, DiT, observation
+adapter, forecasting, rollout, AF3/MSA, VAE/KL/VQ, scaling-law, or later architecture phase
+began.
