@@ -632,3 +632,41 @@ Final phase status: WAITING_FOR_OPERATOR_REVIEW. T1 status: NOT_STARTED. No T1 m
 64-system split, T1 benchmark/training, static/dynamic large-data work, DiT, observation
 adapter, forecasting, rollout, AF3/MSA, VAE/KL/VQ, scaling-law, or later architecture phase
 began.
+### 2026-09-04 — loss-curve readability update
+
+- Updated scripts/run_state_detail_codec_v2_t0.py so aggregate and per-control loss plots use a
+  logarithmic y-axis and overlay train total loss as a solid line with same-color
+  late-holdout/test total loss as a dashed line. Holdout points are placed at cumulative
+  optimizer steps, including the initial point at step zero, so train/holdout divergence is
+  directly visible.
+- Added the plot-only command path; no model, data, loss, checkpoint, or T0 metric was changed:
+  python -m scripts.run_state_detail_codec_v2_t0 --plot-only-run
+  outputs/state_detail_codec_v2/repair/t0_repeat/run_20260904T122210
+- Regenerated loss_curves.png/.pdf and all four loss_curve_<mode>.png/.pdf files under
+  outputs/state_detail_codec_v2/repair/t0_repeat/run_20260904T122210. The generated Markdown
+  report now records the plotting semantics.
+- Updated plotting source SHA256:
+  scripts/run_state_detail_codec_v2_t0.py =
+  bf9906d25639d93ae3d8ad1666d373a762f77c8934407999e40d3771d774779f.
+- Regenerated plot hashes:
+  loss_curves.png 738204eacadfb2a6925c6a926ff20be507d1b81b60a521c13d12ca8be83873a5;
+  loss_curves.pdf 9672fb936586a7ce080c2b847e6b497babd78e44f7453c4c13658158d71a17c7;
+  loss_curve_ratio1_state_detail.png
+  313703d0b5a8eff4ca11d1ae183159bbf3c037f31af0a3862c69f5037f1dc3f7;
+  loss_curve_ratio1_state_detail.pdf
+  0626f6dead3ef3a2b0e29817ed0c3e9eac3f313f379502152575d0bc7ddbca9a;
+  loss_curve_ratio2_state_detail.png
+  5b70c638efa4ac2a68f4496eab72280ae1100972bc3b2426a0ee56f1695df625;
+  loss_curve_ratio2_state_detail.pdf
+  0a59a5e91c7d339ce1ee7dac1342587a227b4e83679b5a2cadd1b5cd9dc7fb34;
+  loss_curve_ratio4_state_detail.png
+  e30387bbbbd86e61317ac64e359be0586bb8c6214ac729bc0c5883523f787af3;
+  loss_curve_ratio4_state_detail.pdf
+  c266b9ef32681e1197de5d4896101fabed9c966bf44f3d1dfc35e54dbb3b9a2c;
+  loss_curve_ratio4_matched_pooling.png
+  b5a98427b85cf6c3e524d17dc3f5623ff0af16d29eb8366247b61a568f63f264;
+  loss_curve_ratio4_matched_pooling.pdf
+  28d2901703f8425ac59895e775337ab9891eab1e5f8fa3e32632db0738440150.
+- Plot-only py_compile passed and the full regression suite remains 115 passed with the same
+  pre-existing FutureWarning. The T0 report values and checkpoints are unchanged.
+- Phase status remains WAITING_FOR_OPERATOR_REVIEW; T1 remains NOT_STARTED.

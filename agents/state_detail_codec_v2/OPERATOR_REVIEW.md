@@ -493,3 +493,27 @@ source root was available during the audit and matches the historical portable c
 The required stop has been honored: no T1 manifest, 64-system split, T1 benchmark, T1 training,
 static/dynamic large-data run, DiT, observation adapter, forecasting, rollout, AF3/MSA, VAE/KL/VQ,
 scaling-law, or later architecture phase began.
+### 10.8 Loss-curve display addendum — 2026-09-04
+
+The existing T0 evidence was re-plotted without retraining. The aggregate loss plot and all four
+per-control loss plots now use a logarithmic y-axis. Training total loss is a solid line; the
+same-control late-holdout/test total loss is a same-color dashed line, aligned to cumulative
+optimizer steps including initial step zero. This makes train/holdout divergence and overfit
+visible.
+
+Plot-only command, run through enter-container with torch-ito:
+
+~~~bash
+python -m scripts.run_state_detail_codec_v2_t0 --plot-only-run \
+  outputs/state_detail_codec_v2/repair/t0_repeat/run_20260904T122210
+~~~
+
+Updated files are loss_curves.png/.pdf and loss_curve_<mode>.png/.pdf in
+outputs/state_detail_codec_v2/repair/t0_repeat/run_20260904T122210. No model, data, loss,
+checkpoint, or evaluation value changed. Plotting source SHA256 is
+bf9906d25639d93ae3d8ad1666d373a762f77c8934407999e40d3771d774779f. The updated aggregate
+Markdown report SHA256 is 46eda7ede9f9abaaf305367aec7797a27c693f4556c85446c7987c4d2ea14150.
+
+Status remains: **WAITING_FOR_OPERATOR_REVIEW**.
+
+T1 status remains: **NOT_STARTED**.

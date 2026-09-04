@@ -1211,9 +1211,7 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
             outputs.append(str(path))
         plt.close(figure)
 
-    figure, axes = plt.subplots(1, 2, figsize=(14, 5))
-    performance_text: list[str] = []
-    for mode, result in results.items():
+    def loss_series(result: Mapping[str, Any]) -> tuple[list[int], list[float], list[int], list[float]]:
         train_rows = [
             json.loads(line)
             for line in Path(result["paths"]["train_metrics"])
@@ -1221,19 +1219,43 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
             .splitlines()
             if line.strip()
         ]
-        epochs = result["epoch_metrics"]
-        axes[0].plot(
-            [row["step"] for row in train_rows],
-            [row["metrics"]["total"] for row in train_rows],
-            label=mode,
-            color=colors[mode],
+        holdout_steps = [0]
+        holdout_loss = [float(result["initial_holdout"]["loss"]["total"])]
+        cumulative_step = 0
+        schedule = result.get("batches_per_epoch_schedule", [])
+        for epoch_index, row in enumerate(result["epoch_metrics"]):
+            if epoch_index < len(schedule):
+                cumulative_step += int(schedule[epoch_index])
+            else:
+                cumulative_step = int(row["step"])
+            holdout_steps.append(cumulative_step)
+            holdout_loss.append(float(row["holdout_evaluation"]["loss"]["total"]))
+        return (
+            [int(row["step"]) for row in train_rows],
+            [float(row["metrics"]["total"]) for row in train_rows],
+            holdout_steps,
+            holdout_loss,
         )
-        axes[1].plot(
-            [0] + [row["epoch"] for row in epochs],
-            [result["initial_holdout"]["loss"]["total"]]
-            + [row["holdout_evaluation"]["loss"]["total"] for row in epochs],
+
+    figure, axis = plt.subplots(figsize=(14, 6))
+    performance_text: list[str] = []
+    for mode, result in results.items():
+        train_steps, train_loss, holdout_steps, holdout_loss = loss_series(result)
+        axis.plot(
+            train_steps,
+            train_loss,
             label=mode,
             color=colors[mode],
+            linestyle="-",
+        )
+        axis.plot(
+            holdout_steps,
+            holdout_loss,
+            label=f"{mode} holdout/test",
+            color=colors[mode],
+            linestyle="--",
+            marker="o",
+            markersize=2.5,
         )
         runtime = result["runtime"]
         performance_text.append(
@@ -1243,17 +1265,14 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
             f"peak {runtime['peak_allocated_memory_bytes'] / 2**30:.1f} GiB | "
             f"params {result['parameter_count']:,}/{result['trainable_parameter_count']:,} trainable"
         )
-    axes[0].set_title("T0 training total loss")
-    axes[0].set_xlabel("optimizer step")
-    axes[0].set_ylabel("loss")
-    axes[1].set_title("T0 late-holdout total loss")
-    axes[1].set_xlabel("epoch (0 = initial)")
-    axes[1].set_ylabel("loss")
-    for axis in axes:
-        axis.grid(alpha=0.25)
-        axis.legend(fontsize=8)
+    axis.set_title("T0 total loss: train (solid) vs late holdout/test (dashed)")
+    axis.set_xlabel("optimizer step")
+    axis.set_ylabel("total loss (log scale)")
+    axis.set_yscale("log")
+    axis.grid(alpha=0.25, which="both")
+    axis.legend(fontsize=8, ncol=2)
     figure.text(0.5, 0.01, "\n".join(performance_text), ha="center", va="bottom", fontsize=8, family="monospace")
-    save(figure, "loss_curves", rect=(0.0, 0.10, 1.0, 0.96))
+    save(figure, "loss_curves", rect=(0.0, 0.14, 1.0, 0.96))
 
     figure, axes = plt.subplots(2, 4, figsize=(20, 10))
     metric_specs = (
@@ -1372,29 +1391,30 @@ def _plot_reports(run_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> li
     save(figure, "performance_summary")
 
     for mode, result in results.items():
-        figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-        train_rows = [
-            json.loads(line)
-            for line in Path(result["paths"]["train_metrics"])
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if line.strip()
-        ]
-        axes[0].plot(
-            [row["step"] for row in train_rows],
-            [row["metrics"]["total"] for row in train_rows],
+        figure, axis = plt.subplots(figsize=(9, 5))
+        train_steps, train_loss, holdout_steps, holdout_loss = loss_series(result)
+        axis.plot(
+            train_steps,
+            train_loss,
             color=colors[mode],
+            linestyle="-",
+            label="train",
         )
-        axes[1].plot(
-            [0] + [row["epoch"] for row in result["epoch_metrics"]],
-            [result["initial_holdout"]["loss"]["total"]]
-            + [row["holdout_evaluation"]["loss"]["total"] for row in result["epoch_metrics"]],
+        axis.plot(
+            holdout_steps,
+            holdout_loss,
             color=colors[mode],
+            linestyle="--",
+            marker="o",
+            markersize=3,
+            label="late holdout/test",
         )
-        axes[0].set_title(f"{mode} training loss")
-        axes[1].set_title(f"{mode} holdout loss")
-        for axis in axes:
-            axis.grid(alpha=0.25)
+        axis.set_title(f"{mode}: train vs late holdout/test total loss")
+        axis.set_xlabel("optimizer step")
+        axis.set_ylabel("total loss (log scale)")
+        axis.set_yscale("log")
+        axis.grid(alpha=0.25, which="both")
+        axis.legend()
         save(figure, f"loss_curve_{mode}")
     return outputs
 
@@ -1504,6 +1524,7 @@ def _write_reports(
             f"- Seed={SEED}; spatial_backbone=torchmd_et; common frozen frame state={FRAME_ENCODER_CHECKPOINT}.",
             "- Coordinate reconstruction: shared centered-vector stem (centered_vector) and shared framewise equivariant decoder; no per-atom x0 anchor.",
             f"- Evaluator: {ALIGNED_RMSD_NAME}=per-frame Kabsch on align_mask scored on loss_mask; {RAW_RMSD_NAME}=direct centroid-gauge coordinate RMSD; contacts use cutoff={CONTACT_CUTOFF_ANGSTROM:g} Å with rule={CONTACT_EXCLUSION_RULE}; dynamic correlation uses mean-removed Kabsch-aligned frame-to-frame velocity.",
+            "- Loss plots use a logarithmic y-axis; solid lines are train total loss and same-color dashed lines are late-holdout/test total loss aligned to optimizer step.",
             "- ratio4_matched_pooling is linear two-bank pooling and is latent-volume-matched, not parameter-matched; its trainable parameter count is reported separately.",
             "- Loss schedule is resolved after the loader length is frozen: 0%-10% coordinate/local/bond; 10%-30% adds velocity; 30%-100% adds acceleration.",
             "",
@@ -1533,7 +1554,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--skip-micro", action="store_true")
     parser.add_argument("--skip-unfreeze-smoke", action="store_true")
     parser.add_argument("--micro-only", action="store_true")
+    parser.add_argument(
+        "--plot-only-run",
+        type=Path,
+        default=None,
+        help="regenerate plots from an existing completed run without training",
+    )
     args = parser.parse_args(argv)
+    if args.plot_only_run is not None:
+        plot_run = args.plot_only_run if args.plot_only_run.is_absolute() else ROOT / args.plot_only_run
+        if not plot_run.is_dir():
+            raise FileNotFoundError(f"existing plot run is missing: {plot_run}")
+        results = {
+            mode: json.loads((plot_run / mode / "result.json").read_text(encoding="utf-8"))
+            for mode in MODES
+        }
+        plots = _plot_reports(plot_run, results)
+        print(json.dumps({"run_dir": str(plot_run), "plots": plots}, indent=2, sort_keys=True))
+        return 0
     STORE_ROOT = args.store_root if args.store_root.is_absolute() else ROOT / args.store_root
     selected = MODES if args.mode == "all" else (args.mode,)
     runtime = _runtime(DEVICE)
