@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import json
 import math
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -16,6 +17,14 @@ from torch import Tensor, nn
 from data.clip_dataset import ClipBatch, TASK_NAMES
 from module.coordinate_decoder import CodecLatent, JointMultiFrameDecoder, LatentConditionedSpatialRefiner
 from module.multiframe_codec import PVBFrameEncoder
+from module.state_detail_codec_v2 import (
+    ORIGIN_RULE,
+    RATIO_FOR_MODE,
+    STATE_DETAIL_MODES,
+    MatchedPoolingCodecV2,
+    StateDetailCodecV2,
+    center_coordinates,
+)
 from module.temporal_codec import CausalTemporalEncoder
 
 from .codec_contract import json_safe, require_contract_equal
@@ -32,6 +41,7 @@ CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v2"
 LEGACY_CODEC_CHECKPOINT_SCHEMA = "pvb.codec.checkpoint.v1"
 CODEC_MODEL_CONTRACT_SCHEMA = "pvb.codec.model_contract.v1"
 CODEC_MODEL_CONTRACT_SCHEMA_V2 = "pvb.codec.model_contract.v2"
+CODEC_MODEL_CONTRACT_SCHEMA_V3 = "pvb.codec.model_contract.v3"
 CODEC_DISTANCE_REFERENCE_SCHEMA = "pvb.codec.distance_reference.v1"
 PVB_MODEL_CONFIG_KEYS = (
     "hidden_channels",
@@ -39,6 +49,7 @@ PVB_MODEL_CONFIG_KEYS = (
     "spatial_backbone",
     "temporal_layers",
     "temporal_ratio",
+    "temporal_codec_mode",
     "num_rbf",
     "num_heads",
     "lmax",
@@ -63,6 +74,9 @@ PVB_MODEL_CONFIG_KEYS = (
     "distance_bond_max_num_neighbors",
     "distance_bond_cache_capacity",
     "spatial_dtype",
+    "frame_encoder_checkpoint",
+    "freeze_frame_encoder",
+    "frame_encoder_source_hash",
 )
 
 
@@ -271,7 +285,8 @@ class PVBCodecModel(nn.Module):
         spatial_layers: int = 2,
         spatial_backbone: str = "torchmd_et",
         temporal_layers: int = 1,
-        temporal_ratio: int = 1,
+        temporal_ratio: int | None = None,
+        temporal_codec_mode: str = "legacy",
         num_rbf: int = 50,
         num_heads: int = 8,
         lmax: int = 1,
@@ -296,8 +311,41 @@ class PVBCodecModel(nn.Module):
         distance_bond_cache_capacity: int = 4096,
         spatial_execution: Mapping[str, Any] | str | None = None,
         spatial_dtype: torch.dtype = torch.float32,
+        frame_encoder_checkpoint: str | Path | None = None,
+        freeze_frame_encoder: bool = False,
+        frame_encoder_source_hash: str | None = None,
     ) -> None:
         super().__init__()
+        temporal_mode = str(temporal_codec_mode).lower()
+        if temporal_mode != "legacy" and temporal_mode not in STATE_DETAIL_MODES:
+            raise ValueError(
+                f"unsupported temporal_codec_mode {temporal_codec_mode!r}; expected "
+                f"'legacy' or one of {STATE_DETAIL_MODES}"
+            )
+        if temporal_ratio is None:
+            resolved_temporal_ratio = (
+                RATIO_FOR_MODE[temporal_mode] if temporal_mode != "legacy" else 1
+            )
+        else:
+            resolved_temporal_ratio = int(temporal_ratio)
+        if temporal_mode != "legacy":
+            expected_ratio = RATIO_FOR_MODE[temporal_mode]
+            if resolved_temporal_ratio != expected_ratio:
+                raise ValueError(
+                    f"temporal_codec_mode={temporal_mode!r} requires "
+                    f"temporal_ratio={expected_ratio}, got {resolved_temporal_ratio}"
+                )
+            if int(temporal_layers) != 1:
+                raise ValueError(
+                    "state/detail codec controls require temporal_layers=1; "
+                    "cross-block temporal stacks are not part of this phase"
+                )
+            if use_spatial_refiner:
+                raise ValueError(
+                    "state/detail codec controls require use_spatial_refiner=false"
+                )
+        if int(temporal_layers) < 0:
+            raise ValueError("temporal_layers must be non-negative")
         if not isinstance(spatial_dtype, torch.dtype):
             raise TypeError("spatial_dtype must be a torch.dtype")
         if spatial_execution is None:
@@ -357,41 +405,91 @@ class PVBCodecModel(nn.Module):
             distance_bond_cache_capacity=distance_bond_cache_capacity,
             dtype=spatial_dtype,
         )
-        self.temporal_encoder = CausalTemporalEncoder(
-            hidden_channels,
-            hidden_channels,
-            ratio=temporal_ratio,
-            num_layers=temporal_layers,
-            num_heads=num_heads,
-            time_scale_ps=time_scale_ps,
+        self.freeze_frame_encoder = bool(freeze_frame_encoder)
+        self.frame_encoder_source_hash = (
+            None
+            if frame_encoder_source_hash in (None, "")
+            else str(frame_encoder_source_hash)
         )
-        refiner = None
-        if use_spatial_refiner:
-            refiner = LatentConditionedSpatialRefiner(
-                hidden_channels,
-                hidden_channels,
-                hidden_channels=hidden_channels,
-                num_layers=spatial_layers,
-                num_rbf=num_rbf,
-                num_heads=num_heads,
-                cutoff_lower=cutoff_lower,
-                cutoff_upper=cutoff_upper,
-                max_num_neighbors=max_num_neighbors,
+        self.frame_encoder_checkpoint_report = None
+        if frame_encoder_checkpoint is not None:
+            checkpoint_path = Path(frame_encoder_checkpoint)
+            if not checkpoint_path.is_file():
+                raise FileNotFoundError(
+                    f"frame encoder checkpoint does not exist: {checkpoint_path}"
+                )
+            digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+            if self.frame_encoder_source_hash is not None and digest != self.frame_encoder_source_hash:
+                raise ValueError(
+                    "frame encoder checkpoint hash disagrees with frame_encoder_source_hash"
+                )
+            self.frame_encoder_source_hash = digest
+            self.frame_encoder_checkpoint_report = self.frame_encoder.load_checkpoint(
+                checkpoint_path
             )
-        self.decoder = JointMultiFrameDecoder(
-            hidden_channels,
-            hidden_channels,
-            temporal_layers=temporal_layers,
-            num_heads=num_heads,
-            time_scale_ps=time_scale_ps,
-            spatial_refiner=refiner,
-        )
+            if self.frame_encoder_checkpoint_report.missing_keys:
+                raise ValueError(
+                    "frame encoder checkpoint is incomplete; missing keys: "
+                    f"{self.frame_encoder_checkpoint_report.missing_keys[:8]}"
+                )
+            if self.frame_encoder_checkpoint_report.shape_mismatch:
+                raise ValueError(
+                    "frame encoder checkpoint contains shape mismatches: "
+                    f"{self.frame_encoder_checkpoint_report.shape_mismatch[:4]}"
+                )
+        if self.freeze_frame_encoder:
+            for parameter in self.frame_encoder.parameters():
+                parameter.requires_grad_(False)
+            self.frame_encoder.eval()
+
+        self.temporal_codec_mode = temporal_mode
+        self.temporal_ratio = resolved_temporal_ratio
+        self.temporal_encoder = None
+        self.decoder = None
+        self.state_detail_codec = None
+        if temporal_mode == "legacy":
+            self.temporal_encoder = CausalTemporalEncoder(
+                hidden_channels,
+                hidden_channels,
+                ratio=resolved_temporal_ratio,
+                num_layers=temporal_layers,
+                num_heads=num_heads,
+                time_scale_ps=time_scale_ps,
+            )
+            refiner = None
+            if use_spatial_refiner:
+                refiner = LatentConditionedSpatialRefiner(
+                    hidden_channels,
+                    hidden_channels,
+                    hidden_channels=hidden_channels,
+                    num_layers=spatial_layers,
+                    num_rbf=num_rbf,
+                    num_heads=num_heads,
+                    cutoff_lower=cutoff_lower,
+                    cutoff_upper=cutoff_upper,
+                    max_num_neighbors=max_num_neighbors,
+                )
+            self.decoder = JointMultiFrameDecoder(
+                hidden_channels,
+                hidden_channels,
+                temporal_layers=temporal_layers,
+                num_heads=num_heads,
+                time_scale_ps=time_scale_ps,
+                spatial_refiner=refiner,
+            )
+        elif temporal_mode == "ratio4_matched_pooling":
+            self.state_detail_codec = MatchedPoolingCodecV2(hidden_channels)
+        else:
+            self.state_detail_codec = StateDetailCodecV2(
+                hidden_channels,
+                mode=temporal_mode,
+            )
         constructor_config: dict[str, Any] = {
                 "hidden_channels": int(hidden_channels),
                 "spatial_layers": int(spatial_layers),
                 "spatial_backbone": str(spatial_backbone),
                 "temporal_layers": int(temporal_layers),
-                "temporal_ratio": int(temporal_ratio),
+                "temporal_ratio": int(resolved_temporal_ratio),
                 "num_rbf": int(num_rbf),
                 "num_heads": int(num_heads),
                 "lmax": int(lmax),
@@ -427,6 +525,14 @@ class PVBCodecModel(nn.Module):
                     ),
                 }
             )
+        if temporal_mode != "legacy":
+            constructor_config.update(
+                {
+                    "temporal_codec_mode": temporal_mode,
+                    "freeze_frame_encoder": bool(self.freeze_frame_encoder),
+                    "frame_encoder_source_hash": self.frame_encoder_source_hash,
+                }
+            )
         self._constructor_config = json_safe(constructor_config)
         self._distance_reference_contract: dict[str, Any] | None = None
 
@@ -455,6 +561,7 @@ class PVBCodecModel(nn.Module):
             "visnet_v2_radius",
             "visnet_v2_bonded",
         }
+        is_state_detail = constructor.get("temporal_codec_mode", "legacy") != "legacy"
         if is_v2:
             spatial_architecture = {
                 "backbone": constructor["spatial_backbone"],
@@ -495,9 +602,52 @@ class PVBCodecModel(nn.Module):
                 "dtype": constructor["spatial_dtype"],
                 "spatial_refiner": constructor["use_spatial_refiner"],
             }
+        architecture_temporal = {
+            "hidden_channels": constructor["hidden_channels"],
+            "layers": constructor["temporal_layers"],
+            "ratio": constructor["temporal_ratio"],
+            "num_heads": constructor["num_heads"],
+            "time_scale_ps": constructor["time_scale_ps"],
+        }
+        architecture_decoder = {
+            "temporal_layers": constructor["temporal_layers"],
+            "num_heads": constructor["num_heads"],
+            "time_scale_ps": constructor["time_scale_ps"],
+        }
+        if is_state_detail:
+            architecture_temporal = {
+                "codec_mode": constructor["temporal_codec_mode"],
+                "ratio": constructor["temporal_ratio"],
+                "layers": constructor["temporal_layers"],
+                "hidden_channels": constructor["hidden_channels"],
+                "block_local": True,
+                "cross_block_attention": False,
+                "coefficient_order": (
+                    []
+                    if constructor["temporal_ratio"] == 1
+                    else ["D01"]
+                    if constructor["temporal_ratio"] == 2
+                    else ["Dmid", "D01", "D23"]
+                ),
+                "active_feature_volume_per_atom": (
+                    16 * constructor["hidden_channels"]
+                    if constructor["temporal_ratio"] in {1, 2}
+                    else 8 * constructor["hidden_channels"]
+                ),
+            }
+            architecture_decoder = {
+                "name": "StateDetailNoAnchorDecoder",
+                "coordinate_head": "shared_framewise_equivariant",
+                "origin_rule": ORIGIN_RULE,
+                "per_atom_anchor": False,
+                "target_coordinates": False,
+                "spatial_refiner": False,
+            }
         return {
             "schema_version": (
-                CODEC_MODEL_CONTRACT_SCHEMA_V2
+                CODEC_MODEL_CONTRACT_SCHEMA_V3
+                if is_state_detail
+                else CODEC_MODEL_CONTRACT_SCHEMA_V2
                 if is_v2
                 else CODEC_MODEL_CONTRACT_SCHEMA
             ),
@@ -505,18 +655,8 @@ class PVBCodecModel(nn.Module):
             "constructor": constructor,
             "architecture": {
                 "spatial": spatial_architecture,
-                "temporal": {
-                    "hidden_channels": constructor["hidden_channels"],
-                    "layers": constructor["temporal_layers"],
-                    "ratio": constructor["temporal_ratio"],
-                    "num_heads": constructor["num_heads"],
-                    "time_scale_ps": constructor["time_scale_ps"],
-                },
-                "decoder": {
-                    "temporal_layers": constructor["temporal_layers"],
-                    "num_heads": constructor["num_heads"],
-                    "time_scale_ps": constructor["time_scale_ps"],
-                },
+                "temporal": architecture_temporal,
+                "decoder": architecture_decoder,
             },
             "graph": graph,
         }
@@ -527,9 +667,10 @@ class PVBCodecModel(nn.Module):
         if schema not in {
             CODEC_MODEL_CONTRACT_SCHEMA,
             CODEC_MODEL_CONTRACT_SCHEMA_V2,
+            CODEC_MODEL_CONTRACT_SCHEMA_V3,
         }:
             raise ValueError(
-                "unsupported PVB model contract; expected v1 or v2 schema"
+                "unsupported PVB model contract; expected v1, v2, or v3 schema"
             )
         if str(contract.get("model_type", "")) != "trainer.codec_trainer.PVBCodecModel":
             raise ValueError("checkpoint model contract is not for PVBCodecModel")
@@ -568,6 +709,80 @@ class PVBCodecModel(nn.Module):
     def distance_reference_contract(self) -> dict[str, Any] | None:
         return None if self._distance_reference_contract is None else json_safe(self._distance_reference_contract)
 
+    @staticmethod
+    def _batch_field(batch: Any, name: str) -> Any:
+        if isinstance(batch, Mapping):
+            if name not in batch:
+                raise ValueError(f"batch is missing required field {name!r}")
+            return batch[name]
+        if not hasattr(batch, name):
+            raise ValueError(f"batch is missing required field {name!r}")
+        return getattr(batch, name)
+
+    def _centered_batch(self, batch: ClipBatch) -> tuple[ClipBatch | Mapping[str, Any], Tensor]:
+        """Center spatial inputs while retaining only one origin per sample."""
+
+        x = torch.as_tensor(self._batch_field(batch, "x"))
+        centered, origin = center_coordinates(
+            x,
+            frame_mask=self._batch_field(batch, "frame_mask"),
+            abid=self._batch_field(batch, "abid"),
+            atom_mask=self._batch_field(batch, "loss_mask"),
+        )
+        if isinstance(batch, ClipBatch):
+            return replace(batch, x=centered), origin
+        if isinstance(batch, Mapping):
+            value = dict(batch)
+            value["x"] = centered
+            return value, origin
+        raise TypeError("codec batch must be a ClipBatch or mapping")
+
+    @staticmethod
+    def _topology_metadata(encoded: Any) -> dict[str, Tensor]:
+        graph = encoded.graph
+        # Deliberately omit graph.pos/edge_vec/edge_weight: a new latent may
+        # carry topology, but no per-atom coordinate reference.
+        return {
+            "z": graph.z,
+            "b": graph.b,
+            "batch": graph.batch,
+            "edge_index": graph.edge_index,
+            "bond_type": graph.bond_type,
+        }
+
+    def _state_detail_encode(self, batch: ClipBatch):
+        if self.temporal_codec_mode == "legacy":
+            raise RuntimeError("state/detail encode is unavailable for the legacy codec")
+        centered_batch, origin = self._centered_batch(batch)
+        encoded = self.frame_encoder(centered_batch)
+        latent = self.state_detail_codec.encode(
+            encoded.h,
+            encoded.v,
+            time_ps=self._batch_field(batch, "time_ps"),
+            frame_mask=self._batch_field(batch, "frame_mask"),
+            abid=self._batch_field(batch, "abid"),
+            sample_origin=origin,
+            topology=self._topology_metadata(encoded),
+        )
+        return latent, encoded
+
+    def encode(self, batch: ClipBatch):
+        """Encode a new codec batch into its structured no-anchor latent."""
+
+        latent, _encoded = self._state_detail_encode(batch)
+        return latent
+
+    def decode(self, latent: Any):
+        """Decode a structured new latent without accepting target coordinates."""
+
+        if self.temporal_codec_mode == "legacy":
+            raise RuntimeError("state/detail decode is unavailable for the legacy codec")
+        return self.state_detail_codec.decode(latent)
+
+    def _decode_state_detail(self, batch: ClipBatch):
+        latent, encoded = self._state_detail_encode(batch)
+        return encoded, self.state_detail_codec.decode(latent)
+
     def _decode_encoded(self, encoded: Any, batch: ClipBatch):
         state = self.temporal_encoder(
             encoded.h,
@@ -596,11 +811,21 @@ class PVBCodecModel(nn.Module):
         )
 
     def forward_with_encoded(self, batch: ClipBatch):
+        if self.temporal_codec_mode != "legacy":
+            return self._decode_state_detail(batch)
         encoded = self.frame_encoder(batch)
         return encoded, self._decode_encoded(encoded, batch)
 
     def forward(self, batch: ClipBatch):
+        if self.temporal_codec_mode != "legacy":
+            return self._decode_state_detail(batch)[1]
         return self._decode_encoded(self.frame_encoder(batch), batch)
+
+    def train(self, mode: bool = True):
+        result = super().train(mode)
+        if self.freeze_frame_encoder:
+            self.frame_encoder.eval()
+        return result
 
 
 def _to_device(value: Any, device: torch.device, *, non_blocking: bool = False) -> Any:
@@ -1229,6 +1454,7 @@ __all__ = [
     "CODEC_DISTANCE_REFERENCE_SCHEMA",
     "CODEC_MODEL_CONTRACT_SCHEMA",
     "CODEC_MODEL_CONTRACT_SCHEMA_V2",
+    "CODEC_MODEL_CONTRACT_SCHEMA_V3",
     "LEGACY_CODEC_CHECKPOINT_SCHEMA",
     "PVB_MODEL_CONFIG_KEYS",
     "CodecTrainConfig",

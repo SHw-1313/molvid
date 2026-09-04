@@ -58,3 +58,22 @@ from .coordinate_decoder import (
     JointDecoder,
     CoordinateDecoder,
 )
+from .state_detail_codec_v2 import (
+    HaarLift,
+    MatchedPoolingCodec,
+    MatchedPoolingCodecV2,
+    MatchedPoolingLatent,
+    ORIGIN_RULE,
+    RATIO_FOR_MODE,
+    STATE_DETAIL_CODEC_SCHEMA,
+    STATE_DETAIL_MODES,
+    StateDetailCodec,
+    StateDetailCodecV2,
+    StateDetailDecoderOutput,
+    StateDetailLatent,
+    StateDetailLatentV2,
+    center_coordinates,
+    compute_masked_centroid_origin,
+    haar_inverse,
+    haar_lift,
+)

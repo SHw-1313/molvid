@@ -60,6 +60,10 @@ model:
   spatial_layers: 2
   temporal_layers: 1
   temporal_ratio: 1
+  # Legacy is the unchanged default. State/detail T0 controls select one of
+  # ratio1_state_detail, ratio2_state_detail, ratio4_state_detail, or
+  # ratio4_matched_pooling explicitly in a phase-specific config/runner.
+  temporal_codec_mode: legacy
   num_rbf: 50
   num_heads: 8
   spatial_backbone: torchmd_et
