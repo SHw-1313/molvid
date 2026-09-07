@@ -20,13 +20,14 @@ from .state_detail_codec_v2 import (
     RATIO_FOR_MODE,
     STATE_DETAIL_CODEC_SCHEMA,
     StateDetailLatent,
+    compute_masked_centroid_origin,
 )
 
 
-DIT_ADAPTER_SCHEMA = "pvb.dit.state_detail.adapter.v1"
-DIT_BATCH_SCHEMA = "pvb.dit.state_detail.batch.v1"
-DIT_STATS_SCHEMA = "pvb.dit.state_detail.stats.v1"
-DIT_MODEL_SCHEMA = "pvb.dit.state_detail.model.v1"
+DIT_ADAPTER_SCHEMA = "pvb.dit.state_detail.adapter.v2"
+DIT_BATCH_SCHEMA = "pvb.dit.state_detail.batch.v2"
+DIT_STATS_SCHEMA = "pvb.dit.state_detail.stats.v2"
+DIT_MODEL_SCHEMA = "pvb.dit.state_detail.model.v2"
 SUPPORTED_DIT_MODES = ("ratio2_state_detail", "ratio4_state_detail")
 SUPPORTED_RATIOS = (2, 4)
 FRAME_COUNT = 16
@@ -180,6 +181,7 @@ class DiTLatentBatch:
     mode: str
     width: int
     observed_mask: Optional[Tensor] = None
+    loss_mask: Optional[Tensor] = None
     atom_type: Optional[Tensor] = None
     block_type: Optional[Tensor] = None
     component_id: Optional[Tensor] = None
@@ -244,6 +246,12 @@ class DiTLatentBatch:
             )
             if self.observed_mask.shape != self.token_mask.shape:
                 raise ValueError("observed_mask must have shape [B,K]")
+        if self.loss_mask is not None:
+            self.loss_mask = torch.as_tensor(
+                self.loss_mask, device=self.abid.device, dtype=torch.bool
+            ).flatten()
+            if self.loss_mask.numel() != self.abid.numel():
+                raise ValueError("loss_mask must have shape [N]")
         self.block_frame_mask = torch.as_tensor(
             self.block_frame_mask, dtype=torch.bool, device=self.fields.state_h.device
         )
@@ -272,10 +280,34 @@ class DiTLatentBatch:
                 raise ValueError(f"{name} must have shape [N]")
             setattr(self, name, value)
         self.atom_ptr = torch.as_tensor(self.atom_ptr, device=self.abid.device, dtype=torch.long).flatten()
-        if self.atom_ptr.numel() != batch_size + 1 or int(self.atom_ptr[-1]) != self.abid.numel():
-            raise ValueError("atom_ptr must have shape [B+1] and end at N")
-        if not torch.isfinite(self.fields.state_h).all() or not torch.isfinite(self.fields.state_v).all():
-            raise ValueError("latent fields must be finite")
+        if (
+            self.atom_ptr.numel() != batch_size + 1
+            or int(self.atom_ptr[0]) != 0
+            or int(self.atom_ptr[-1]) != self.abid.numel()
+            or torch.any(self.atom_ptr[1:] < self.atom_ptr[:-1])
+        ):
+            raise ValueError("atom_ptr must be monotone, start at zero, and end at N")
+        expected_abid = torch.repeat_interleave(
+            torch.arange(batch_size, device=self.abid.device, dtype=torch.long),
+            self.atom_ptr[1:] - self.atom_ptr[:-1],
+        )
+        if not torch.equal(self.abid, expected_abid):
+            raise ValueError("abid must follow the declared atom_ptr sample boundaries")
+        if self.topology is not None:
+            if hasattr(self.topology, "abid"):
+                topology_abid = torch.as_tensor(
+                    self.topology.abid, device=self.abid.device, dtype=torch.long
+                ).flatten()
+                if not torch.equal(topology_abid, self.abid):
+                    raise ValueError("topology.abid does not match the latent batch")
+            if hasattr(self.topology, "atom_ptr"):
+                topology_ptr = torch.as_tensor(
+                    self.topology.atom_ptr, device=self.abid.device, dtype=torch.long
+                ).flatten()
+                if not torch.equal(topology_ptr, self.atom_ptr):
+                    raise ValueError("topology.atom_ptr does not match the latent batch")
+        if any(not torch.isfinite(value).all() for value in self.fields.as_dict().values()):
+            raise ValueError("all latent fields must be finite")
 
     @property
     def state_h(self) -> Tensor:
@@ -359,6 +391,7 @@ class DiTLatentBatch:
             abid=self.abid.to(*args, **kwargs),
             sample_origin=self.sample_origin.to(*args, **kwargs),
             observed_mask=self.observed_mask.to(*args, **kwargs),
+            loss_mask=None if self.loss_mask is None else self.loss_mask.to(*args, **kwargs),
             atom_type=self.atom_type.to(*args, **kwargs),
             block_type=self.block_type.to(*args, **kwargs),
             component_id=self.component_id.to(*args, **kwargs),
@@ -389,6 +422,8 @@ class DiTLatentBatch:
             "abid_shape": list(self.abid.shape),
             "sample_origin_shape": list(self.sample_origin.shape),
             "observed_mask_shape": list(self.observed_mask.shape),
+            "loss_mask_shape": None if self.loss_mask is None else list(self.loss_mask.shape),
+            "loss_mask_hash": None if self.loss_mask is None else tensor_hash(self.loss_mask),
             "topology": topology_contract,
             "contains_raw_detail": False,
             "contains_target_coordinates": False,
@@ -479,6 +514,7 @@ class StateDetailLatentAdapter(nn.Module):
         codec_hash: str = "",
         data_hash: str = "",
         origin_from_latent: bool = False,
+        loss_mask: Optional[Tensor] = None,
     ) -> DiTLatentBatch:
         self.validate_latent(latent)
         batch_size = int(latent.block_frame_mask.shape[0])
@@ -498,6 +534,7 @@ class StateDetailLatentAdapter(nn.Module):
             ratio=self.ratio,
             mode=self.mode,
             width=self.codec_width,
+            loss_mask=loss_mask,
             codec_hash=str(codec_hash),
             data_hash=str(data_hash),
         ).zero_invalid()
@@ -608,6 +645,7 @@ def _observed_origins(
     batch: DiTLatentBatch,
     frame_observation_mask: Tensor,
     history_frames: int,
+    atom_mask: Optional[Tensor],
 ) -> Tensor:
     origin = batch.sample_origin.new_zeros((batch.batch_size, 3))
     if history_frames == 0:
@@ -619,11 +657,14 @@ def _observed_origins(
         raise ValueError("clean observed coordinates must have shape [T,N,3]")
     if not bool(frame_observation_mask[:, 0].all()):
         raise ValueError("H>0 requires an observed frame-0 for every sample")
-    origin.index_add_(0, batch.abid, x[0])
-    counts = torch.bincount(batch.abid, minlength=batch.batch_size).to(origin.dtype).unsqueeze(-1)
-    if torch.any(counts <= 0):
-        raise ValueError("each sample must have at least one atom for the observed origin")
-    return origin / counts
+    if atom_mask is None:
+        raise ValueError("H>0 observation origin requires the static codec loss_mask")
+    return compute_masked_centroid_origin(
+        x,
+        frame_mask=frame_observation_mask,
+        abid=batch.abid,
+        atom_mask=atom_mask,
+    )
 
 
 def build_observation_condition(
@@ -633,6 +674,7 @@ def build_observation_condition(
     coordinates: Optional[Tensor] = None,
     frame_mask: Optional[Tensor] = None,
     observed_frame_mask: Optional[Tensor] = None,
+    loss_mask: Optional[Tensor] = None,
 ) -> ObservationCondition:
     """Build block-aligned observation state without retaining target coordinates."""
 
@@ -641,7 +683,11 @@ def build_observation_condition(
     if frame_mask is not None and observed_frame_mask is not None:
         raise ValueError("pass frame_mask or observed_frame_mask, not both")
     if frame_mask is not None:
-        source_mask = _validate_frame_mask(frame_mask, batch_size=batch.batch_size, frames=frames)
+        source_mask = _validate_frame_mask(
+            torch.as_tensor(frame_mask, device=source_mask.device, dtype=torch.bool),
+            batch_size=batch.batch_size,
+            frames=frames,
+        )
     else:
         source_mask.zero_()
         flat = batch.block_frame_mask.reshape(batch.batch_size, -1)
@@ -668,7 +714,20 @@ def build_observation_condition(
             f"R2/R4 boundary (locations={locations[:4]})"
         )
     latent_observed = (observed_blocks | ~valid).all(dim=-1) & valid.any(dim=-1)
-    origin = _observed_origins(coordinates, batch, observed_frames, int(history_frames))
+    static_loss_mask = batch.loss_mask if loss_mask is None else loss_mask
+    if static_loss_mask is not None:
+        static_loss_mask = torch.as_tensor(
+            static_loss_mask, device=batch.state_h.device, dtype=torch.bool
+        ).flatten()
+        if static_loss_mask.numel() != batch.num_atoms:
+            raise ValueError("loss_mask must have shape [N]")
+    origin = _observed_origins(
+        coordinates,
+        batch,
+        observed_frames,
+        int(history_frames),
+        static_loss_mask,
+    )
     return ObservationCondition(
         frame_observation_mask=observed_frames.detach().clone(),
         latent_observation_mask=latent_observed.detach().clone(),
@@ -694,6 +753,8 @@ class LatentStatistics:
     schema_version: str = DIT_STATS_SCHEMA
 
     def __post_init__(self) -> None:
+        if self.schema_version != DIT_STATS_SCHEMA:
+            raise ValueError(f"unsupported statistics schema {self.schema_version!r}")
         if self.ratio not in SUPPORTED_RATIOS or self.mode != f"ratio{self.ratio}_state_detail":
             raise ValueError("statistics must be ratio2_state_detail or ratio4_state_detail")
         values = (
@@ -833,6 +894,59 @@ class LatentStatistics:
     @property
     def hash(self) -> str:
         return contract_hash(self.contract())
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return a self-contained, CPU-portable statistics artifact."""
+
+        return {
+            "schema_version": self.schema_version,
+            "ratio": int(self.ratio),
+            "mode": self.mode,
+            "width": int(self.width),
+            "state_h_mean": self.state_h_mean.detach().to(device="cpu").clone(),
+            "state_h_std": self.state_h_std.detach().to(device="cpu").clone(),
+            "detail_h_mean": self.detail_h_mean.detach().to(device="cpu").clone(),
+            "detail_h_std": self.detail_h_std.detach().to(device="cpu").clone(),
+            "state_v_rms": self.state_v_rms.detach().to(device="cpu").clone(),
+            "detail_v_rms": self.detail_v_rms.detach().to(device="cpu").clone(),
+            "provenance": dict(self.provenance),
+            "statistics_hash": self.hash,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: Mapping[str, Any]) -> "LatentStatistics":
+        required = (
+            "ratio",
+            "mode",
+            "width",
+            "state_h_mean",
+            "state_h_std",
+            "detail_h_mean",
+            "detail_h_std",
+            "state_v_rms",
+            "detail_v_rms",
+            "provenance",
+        )
+        missing = [name for name in required if name not in state]
+        if missing:
+            raise ValueError(f"statistics state is missing fields: {missing}")
+        value = cls(
+            ratio=int(state["ratio"]),
+            mode=str(state["mode"]),
+            width=int(state["width"]),
+            state_h_mean=torch.as_tensor(state["state_h_mean"]).detach().clone(),
+            state_h_std=torch.as_tensor(state["state_h_std"]).detach().clone(),
+            detail_h_mean=torch.as_tensor(state["detail_h_mean"]).detach().clone(),
+            detail_h_std=torch.as_tensor(state["detail_h_std"]).detach().clone(),
+            state_v_rms=torch.as_tensor(state["state_v_rms"]).detach().clone(),
+            detail_v_rms=torch.as_tensor(state["detail_v_rms"]).detach().clone(),
+            provenance=dict(state["provenance"]),
+            schema_version=str(state.get("schema_version", DIT_STATS_SCHEMA)),
+        )
+        stored_hash = state.get("statistics_hash")
+        if stored_hash is not None and str(stored_hash) != value.hash:
+            raise ValueError("statistics artifact hash does not match its tensors and provenance")
+        return value
 
     def to(self, *args, **kwargs) -> "LatentStatistics":
         return replace(

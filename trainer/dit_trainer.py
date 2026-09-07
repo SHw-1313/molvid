@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+from contextlib import nullcontext
 import random
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -23,7 +24,7 @@ from module.state_detail_latent_adapter import (
 )
 
 
-DIT_CHECKPOINT_SCHEMA = "pvb.dit.state_detail.checkpoint.v1"
+DIT_CHECKPOINT_SCHEMA = "pvb.dit.state_detail.checkpoint.v2"
 
 
 def module_state_hash(module: nn.Module) -> str:
@@ -115,6 +116,13 @@ class DiTTrainer:
         self.adapter = adapter
         self.config = config
         self.statistics = statistics
+        model_parameter = next(iter(model.parameters()), None)
+        if model_parameter is None:
+            raise ValueError("the DiT must expose parameters")
+        self.device = model_parameter.device
+        if config.amp and self.device.type != "cuda":
+            raise RuntimeError("DiT AMP requires a CUDA model; CPU fallback is not AMP")
+        self.amp_enabled = bool(config.amp)
         if statistics is not None:
             if statistics.ratio != config.ratio or statistics.mode != config.mode:
                 raise ValueError("statistics ratio/mode disagrees with trainer config")
@@ -135,18 +143,25 @@ class DiTTrainer:
             weight_decay=config.weight_decay,
         )
         self.scheduler = scheduler
-        amp_enabled = bool(config.amp and torch.cuda.is_available())
         if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-            self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+            self.scaler = torch.amp.GradScaler("cuda", enabled=self.amp_enabled)
         else:
-            self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+            self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
         self.step = 0
+        self.last_activation_dtypes: dict[str, str] = {}
         self._rng_seed = int(config.seed)
         _set_seed(self._rng_seed)
         self.frozen_hashes = self.frozen_state_hashes()
         self.codec_contract = (
             self.codec.model_contract() if self.codec is not None and hasattr(self.codec, "model_contract") else {}
         )
+
+    def autocast_context(self):
+        """Use the repository's explicit CUDA BF16 policy when AMP is enabled."""
+
+        if not self.amp_enabled:
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 
     @staticmethod
     def _freeze_module(module: Optional[nn.Module], label: str) -> None:
@@ -187,8 +202,13 @@ class DiTTrainer:
         batch = self._normalise_batch(batch)
         flow_sample = self.flow.sample(batch, generator=generator)
         noisy_batch = batch.with_fields(flow_sample.interpolated)
-        prediction = self.model(noisy_batch, flow_sample.tau)
-        loss = self.flow.loss(prediction, flow_sample.target, batch)
+        with self.autocast_context():
+            prediction = self.model(noisy_batch, flow_sample.tau)
+            self.last_activation_dtypes = {
+                name: str(getattr(prediction, name).dtype)
+                for name in prediction.names()
+            }
+            loss = self.flow.loss(prediction, flow_sample.target, batch)
         if not torch.isfinite(loss.total):
             raise FloatingPointError("non-finite DiT loss")
         self.optimizer.zero_grad(set_to_none=True)
@@ -244,6 +264,7 @@ class DiTTrainer:
             "adapter_contract_hash": contract_hash(self.adapter.contract()),
             "statistics_contract": stats_contract,
             "statistics_hash": "" if self.statistics is None else self.statistics.hash,
+            "statistics_state": None if self.statistics is None else self.statistics.state_dict(),
             "codec_contract": self.codec_contract,
             "codec_hash": self.config.codec_hash,
             "data_hash": self.config.data_hash,
@@ -281,6 +302,18 @@ class DiTTrainer:
         expected_stats = "" if self.statistics is None else self.statistics.hash
         if payload.get("statistics_hash", "") != expected_stats:
             raise ValueError("checkpoint statistics hash mismatch")
+        statistics_state = payload.get("statistics_state")
+        if self.statistics is None:
+            if statistics_state is not None:
+                raise ValueError("checkpoint contains statistics but trainer has no matching statistics")
+        else:
+            if not isinstance(statistics_state, Mapping):
+                raise ValueError("checkpoint is missing serialized statistics tensors")
+            restored = LatentStatistics.from_state_dict(statistics_state)
+            if restored.hash != self.statistics.hash:
+                raise ValueError("checkpoint serialized statistics mismatch")
+            if statistics_state.get("statistics_hash") != payload.get("statistics_hash"):
+                raise ValueError("checkpoint statistics artifact hash mismatch")
         if payload.get("codec_contract", {}) != self.codec_contract:
             raise ValueError("checkpoint codec contract mismatch")
         expected_model = contract_hash(self.model.contract()) if hasattr(self.model, "contract") else ""
@@ -293,6 +326,11 @@ class DiTTrainer:
 
     def load_checkpoint(self, path: str | Path, *, map_location: Any = "cpu") -> dict[str, Any]:
         payload = torch.load(path, map_location=map_location, weights_only=False)
+        if self.statistics is None and payload.get("statistics_state") is not None:
+            self.statistics = LatentStatistics.from_state_dict(payload["statistics_state"])
+            if self.config.stats_hash and self.config.stats_hash != self.statistics.hash:
+                raise ValueError("checkpoint statistics hash disagrees with trainer config")
+            self.config.stats_hash = self.statistics.hash
         self._validate_checkpoint(payload)
         self.model.load_state_dict(payload["model_state"])
         self.optimizer.load_state_dict(payload["optimizer_state"])
@@ -315,6 +353,16 @@ class DiTTrainer:
         if self.frozen_state_hashes() != self.frozen_hashes:
             raise RuntimeError("frozen codec/frame-encoder state changed during checkpoint load")
         return dict(payload)
+
+    @staticmethod
+    def load_statistics_from_checkpoint(
+        path: str | Path, *, map_location: Any = "cpu"
+    ) -> LatentStatistics:
+        payload = torch.load(path, map_location=map_location, weights_only=False)
+        state = payload.get("statistics_state")
+        if not isinstance(state, Mapping):
+            raise ValueError("checkpoint does not contain serialized latent statistics")
+        return LatentStatistics.from_state_dict(state)
 
 
 __all__ = [

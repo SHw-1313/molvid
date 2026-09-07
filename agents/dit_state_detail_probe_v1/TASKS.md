@@ -103,3 +103,25 @@ Status legend: `[ ]` pending, `[-]` active, `[x]` complete, `[!]` blocked.
 - [!] D104 select the default codec for scaling and plan the next model-size/data-size stage
 
 D100–D104 require a later explicit operator authorization even if D000–D064 pass.
+
+## Review-fix repair record — 2026-09-07
+
+- [x] D070 repair vector normalization, vector FFN nonlinearities, scalar/vector interaction, and
+  nonzero-gate SO(3) tests without changing the factorized DiT architecture
+- [x] D071 restore the codec-compatible loss-masked origin for H>0 and fixed zero origin for H=0;
+  add future-mutation, masked-atom, and clamped-gauge tests
+- [x] D072 make conditional evaluation history-aware for observed, future, boundary, and full
+  diagnostic intervals, including sliced temporal metrics and ragged/loss masks
+- [x] D073 add actual CUDA BF16 autocast policy and activation-dtype coverage; reject CPU AMP
+- [x] D074 persist and reconstruct all six latent-statistics tensors with provenance and hash;
+  validate all latent fields and topology/sample contracts
+- [x] D075 add explicit CUDA correctness coverage for forward/backward, rotation, checkpoint
+  recovery, sampling, history-aware evaluation, and gradient groups
+- [x] D076 rerun the repaired focused and complete CPU suites, compile checks, diff check, and
+  forbidden-input/source audit
+- [x] D077 run the audited-GPU correctness test and verify the repaired branches under real CUDA
+  BF16 autocast
+- [x] D078 run exactly one final two-step H=4 smoke for each candidate with 24 combined sampling
+  evaluations, fresh statistics recovery, exact clamping, and corrected throughput accounting
+- [x] D079 append the repair evidence and operator review, stage only source/tests/docs, and
+  create the focused repair commit; no scientific pilot is authorized in this phase

@@ -248,6 +248,17 @@ def euler_sample(
         )
         current = apply_observation_clamp(current, batch.fields, batch)
     result = batch.with_fields(current).zero_invalid()
+    observed = batch.observed_mask.index_select(0, batch.abid).transpose(0, 1)
+    clamp_errors: list[Tensor] = []
+    for name in FIELD_NAMES:
+        value = getattr(current, name)
+        clean = getattr(batch.fields, name)
+        expanded = observed.reshape(observed.shape + (1,) * (value.ndim - 2))
+        if bool(torch.any(expanded)):
+            clamp_errors.append((value - clean).abs().masked_select(expanded).max())
+    observed_clamp_max_abs = (
+        float(torch.stack(clamp_errors).max().detach().cpu()) if clamp_errors else 0.0
+    )
     if statistics is not None:
         result = statistics.inverse_normalize(result)
     if was_training:
@@ -258,6 +269,8 @@ def euler_sample(
         "seed": int(seed),
         "deterministic": True,
         "observed_clamp": True,
+        "observed_clamp_exact": observed_clamp_max_abs == 0.0,
+        "observed_clamp_max_abs": observed_clamp_max_abs,
         "stats_hash": "" if statistics is None else statistics.hash,
         "adapter_hash": "" if adapter is None else contract_hash(adapter.contract()),
     }

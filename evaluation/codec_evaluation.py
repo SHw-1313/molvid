@@ -560,16 +560,68 @@ def _align_trajectory_to_first(
     return aligned
 
 
+def _frame_view(batch: Any, frames: Sequence[int]) -> dict[str, Any]:
+    """Build a shallow batch view whose temporal metadata matches the selected frames."""
+
+    values = dict(batch) if isinstance(batch, Mapping) else dict(vars(batch))
+    frame_mask = values.get("frame_mask")
+    if frame_mask is None:
+        raise ValueError("evaluation batch must declare frame_mask")
+    frame_mask = torch.as_tensor(frame_mask)
+    total_frames = int(frame_mask.shape[1])
+    selected = tuple(int(index) for index in frames)
+    if any(index < 0 or index >= total_frames for index in selected):
+        raise ValueError("requested frame interval is outside the batch")
+    index = torch.as_tensor(selected, device=frame_mask.device, dtype=torch.long)
+    values["frame_mask"] = frame_mask.index_select(1, index)
+    for name in ("time_ps", "frame_time_ps"):
+        value = values.get(name)
+        if value is not None:
+            value = torch.as_tensor(value)
+            if value.ndim >= 2 and value.shape[1] == total_frames:
+                values[name] = value.index_select(1, index)
+    for name in ("x", "bpos"):
+        value = values.get(name)
+        if value is not None:
+            value = torch.as_tensor(value)
+            if value.ndim >= 1 and value.shape[0] == total_frames:
+                values[name] = value.index_select(0, index)
+    delta = values.get("delta_time_ps")
+    if delta is not None:
+        delta = torch.as_tensor(delta)
+        if len(selected) < 2:
+            values["delta_time_ps"] = delta.new_empty((delta.shape[0], 0))
+        elif "time_ps" in values:
+            values["delta_time_ps"] = values["time_ps"][:, 1:] - values["time_ps"][:, :-1]
+        else:
+            previous = torch.as_tensor(
+                frames[:-1], device=delta.device, dtype=torch.long
+            )
+            values["delta_time_ps"] = delta.index_select(1, previous)
+    return values
+
+
 def aligned_rmsf_metrics(
     prediction: Tensor,
     target: Tensor,
     batch: Any,
     mask: Tensor | None = None,
+    *,
+    frames: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Compute RMSF after per-frame rigid-body handling, equal by sample."""
 
     if prediction.shape != target.shape or prediction.ndim != 3:
         raise ValueError("coordinates must both have shape [T, N, 3]")
+    if frames is not None:
+        selected = tuple(int(index) for index in frames)
+        view = _frame_view(batch, selected)
+        index = torch.as_tensor(selected, device=prediction.device, dtype=torch.long)
+        prediction = prediction.index_select(0, index)
+        target = target.index_select(0, index)
+        batch = view
+        if mask is not None:
+            mask = mask.index_select(0, index)
     if mask is None:
         mask = _mask(batch, prediction.shape[0], prediction.device)
     frame_valid = _frame_atom_mask(batch, prediction.shape[0], prediction.device)
@@ -640,11 +692,22 @@ def dynamic_acf_metrics(
     target: Tensor,
     batch: Any,
     mask: Tensor | None = None,
+    *,
+    frames: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Measure lag-1 ACF and prediction/target correlation on aligned velocity."""
 
     if prediction.shape != target.shape or prediction.ndim != 3:
         raise ValueError("coordinates must both have shape [T, N, 3]")
+    if frames is not None:
+        selected = tuple(int(index) for index in frames)
+        view = _frame_view(batch, selected)
+        index = torch.as_tensor(selected, device=prediction.device, dtype=torch.long)
+        prediction = prediction.index_select(0, index)
+        target = target.index_select(0, index)
+        batch = view
+        if mask is not None:
+            mask = mask.index_select(0, index)
     frames = int(prediction.shape[0])
     if mask is None:
         mask = _mask(batch, frames, prediction.device)
@@ -717,12 +780,121 @@ def dynamic_acf_metrics(
     }
 
 
-def _metrics(prediction: Tensor, target: Tensor, batch: Any) -> dict[str, Any]:
+def _empty_temporal_metrics() -> dict[str, Any]:
+    return {
+        "velocity_rmse": 0.0,
+        "acceleration_rmse": 0.0,
+        "frequency_retention": 0.0,
+        "rmsf": {},
+        "dynamic": {},
+    }
+
+
+def _temporal_metrics(
+    prediction: Tensor,
+    target: Tensor,
+    batch: Any,
+    frames: Sequence[int],
+) -> dict[str, Any]:
+    selected = tuple(int(index) for index in frames)
+    if not selected:
+        return _empty_temporal_metrics()
+    view = _frame_view(batch, selected)
+    index = torch.as_tensor(selected, device=prediction.device, dtype=torch.long)
+    prediction_view = prediction.index_select(0, index)
+    target_view = target.index_select(0, index)
+    mask = _mask(view, len(selected), prediction.device)
+    return {
+        "velocity_rmse": math.sqrt(
+            max(float(velocity_loss(prediction_view, target_view, view).detach().cpu()), 0.0)
+        ),
+        "acceleration_rmse": math.sqrt(
+            max(float(acceleration_loss(prediction_view, target_view, view).detach().cpu()), 0.0)
+        ),
+        "frequency_retention": _frequency_retention(
+            prediction_view, target_view, mask
+        ),
+        "rmsf": aligned_rmsf_metrics(
+            prediction_view, target_view, view, mask
+        ),
+        "dynamic": dynamic_acf_metrics(
+            prediction_view, target_view, view, mask
+        ),
+    }
+
+
+def _boundary_metrics(
+    prediction: Tensor,
+    target: Tensor,
+    batch: Any,
+    history_frames: int,
+) -> dict[str, Any]:
+    boundary = int(history_frames)
+    if boundary <= 0 or boundary >= prediction.shape[0]:
+        return {
+            "available": False,
+            "history_frames": boundary,
+            "frame_interval": None,
+            "valid_elements": 0,
+            "predicted_step_magnitude": None,
+            "target_step_magnitude": None,
+            "step_difference": None,
+        }
+    mask = _mask(batch, prediction.shape[0], prediction.device)
+    valid = mask[boundary - 1] & mask[boundary]
+    if not torch.any(valid):
+        return {
+            "available": False,
+            "history_frames": boundary,
+            "frame_interval": [boundary - 1, boundary],
+            "valid_elements": 0,
+            "predicted_step_magnitude": None,
+            "target_step_magnitude": None,
+            "step_difference": None,
+        }
+    predicted_step = prediction[boundary] - prediction[boundary - 1]
+    target_step = target[boundary] - target[boundary - 1]
+    return {
+        "available": True,
+        "history_frames": boundary,
+        "frame_interval": [boundary - 1, boundary],
+        "valid_elements": int(valid.sum().item()),
+        "predicted_step_magnitude": float(
+            predicted_step[valid].square().sum(dim=-1).mean().sqrt().detach().cpu()
+        ),
+        "target_step_magnitude": float(
+            target_step[valid].square().sum(dim=-1).mean().sqrt().detach().cpu()
+        ),
+        "step_difference": float(
+            (predicted_step[valid] - target_step[valid]).square().sum(dim=-1).mean().sqrt().detach().cpu()
+        ),
+    }
+
+
+def _metrics(
+    prediction: Tensor,
+    target: Tensor,
+    batch: Any,
+    *,
+    history_frames: int | None = None,
+) -> dict[str, Any]:
     if prediction.shape != target.shape or prediction.ndim != 3 or prediction.shape[-1] != 3:
         raise ValueError("control output and target must both have shape [T, N, 3]")
     mask = _mask(batch, prediction.shape[0], prediction.device)
-    future = list(range(1, prediction.shape[0]))
+    total_frames = int(prediction.shape[0])
+    if history_frames is None:
+        observed = None
+        future = list(range(1, total_frames))
+    else:
+        history = int(history_frames)
+        if history not in (0, 4, 8):
+            raise ValueError("history_frames must be H=0, H=4, or H=8")
+        if history > total_frames:
+            raise ValueError("history_frames cannot exceed the coordinate sequence")
+        observed = list(range(history))
+        future = list(range(history, total_frames))
     all_frames = list(range(prediction.shape[0]))
+
     def one(frames: Sequence[int]) -> dict[str, float]:
         contacts = contact_metrics(prediction, target, batch, mask, frames)
         raw_rmsd = _rmsd(prediction, target, mask, frames)
@@ -739,22 +911,73 @@ def _metrics(prediction: Tensor, target: Tensor, batch: Any) -> dict[str, Any]:
             "clash_rate": _clash_rate(prediction, batch, mask, frames),
             "torsion_change": _torsion_change(prediction, target, batch, mask, frames),
         }
+
     future_metrics = one(future) if future else one([])
     result = {
         "frame0": one([0]),
         "future": future_metrics,
         "all_frames": one(all_frames),
-        "velocity_rmse": math.sqrt(max(float(velocity_loss(prediction, target, batch).detach().cpu()), 0.0)),
-        "acceleration_rmse": math.sqrt(max(float(acceleration_loss(prediction, target, batch).detach().cpu()), 0.0)),
-        "frequency_retention": _frequency_retention(prediction, target, mask),
-        "evaluation_protocol": {
-            "aligned_rmsd": "per-frame Kabsch using align_mask; RMSD over loss_mask",
-            "raw_rmsd": "centroid_gauge_raw_rmsd; direct coordinate difference",
-            "contact_cutoff_angstrom": CONTACT_CUTOFF_ANGSTROM,
-            "contact_exclusion_rule": CONTACT_EXCLUSION_RULE,
-            "frequency_retention_interpretation": "values above one indicate excessive predicted motion",
-        },
     }
+    protocol = {
+        "aligned_rmsd": "per-frame Kabsch using align_mask; RMSD over loss_mask",
+        "raw_rmsd": "centroid_gauge_raw_rmsd; direct coordinate difference",
+        "contact_cutoff_angstrom": CONTACT_CUTOFF_ANGSTROM,
+        "contact_exclusion_rule": CONTACT_EXCLUSION_RULE,
+        "frequency_retention_interpretation": "values above one indicate excessive predicted motion",
+    }
+    if history_frames is None:
+        result.update(
+            {
+                "velocity_rmse": math.sqrt(
+                    max(float(velocity_loss(prediction, target, batch).detach().cpu()), 0.0)
+                ),
+                "acceleration_rmse": math.sqrt(
+                    max(float(acceleration_loss(prediction, target, batch).detach().cpu()), 0.0)
+                ),
+                "frequency_retention": _frequency_retention(prediction, target, mask),
+            }
+        )
+        protocol["future_frame_interval"] = [1, total_frames]
+    else:
+        assert observed is not None
+        observed_metrics = one(observed) if observed else one([])
+        full_temporal = _temporal_metrics(prediction, target, batch, all_frames)
+        observed_temporal = _temporal_metrics(prediction, target, batch, observed)
+        future_temporal = _temporal_metrics(prediction, target, batch, future)
+        result["observed"] = observed_metrics
+        result["boundary"] = _boundary_metrics(prediction, target, batch, history_frames)
+        result["temporal"] = {
+            "observed": observed_temporal,
+            "future": future_temporal,
+            "full_diagnostic": full_temporal,
+        }
+        result["full_diagnostic"] = full_temporal
+        result.update(
+            {
+                "velocity_rmse": future_temporal["velocity_rmse"],
+                "acceleration_rmse": future_temporal["acceleration_rmse"],
+                "frequency_retention": future_temporal["frequency_retention"],
+            }
+        )
+        protocol.update(
+            {
+                "history_frames": int(history_frames),
+                "observed_frame_interval": [0, int(history_frames)],
+                "future_frame_interval": [int(history_frames), total_frames],
+                "boundary_frame_interval": (
+                    None
+                    if int(history_frames) == 0
+                    else [int(history_frames) - 1, int(history_frames)]
+                ),
+                "full_diagnostic_frame_interval": [0, total_frames],
+                "temporal_metric_sections": {
+                    "observed": "observed_frame_interval",
+                    "future": "future_frame_interval",
+                    "full_diagnostic": "full_diagnostic_frame_interval",
+                },
+            }
+        )
+    result["evaluation_protocol"] = protocol
     return result
 
 

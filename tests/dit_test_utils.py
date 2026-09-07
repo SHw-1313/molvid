@@ -13,6 +13,7 @@ def make_batch(
     atom_counts: tuple[int, ...] = (2, 3),
     seed: int = 11,
     invalid_last_token: bool = False,
+    loss_mask: torch.Tensor | None = None,
 ) -> DiTLatentBatch:
     ratio = int(ratio)
     k_count = 16 // ratio
@@ -54,6 +55,12 @@ def make_batch(
         topology_id=tuple(f"topology-{index}" for index in range(batch_size)),
         sample_id=tuple(f"sample-{index}" for index in range(batch_size)),
     )
+    if loss_mask is None:
+        loss_mask = torch.ones(n_atoms, dtype=torch.bool)
+    else:
+        loss_mask = torch.as_tensor(loss_mask, dtype=torch.bool).flatten()
+        if loss_mask.numel() != n_atoms:
+            raise ValueError("loss_mask fixture must have shape [N]")
     return DiTLatentBatch(
         fields=fields,
         token_mask=token_mask,
@@ -68,6 +75,7 @@ def make_batch(
         ratio=ratio,
         mode=f"ratio{ratio}_state_detail",
         width=width,
+        loss_mask=loss_mask,
         atom_type=topology.atom_type,
         block_type=topology.block_type,
         component_id=topology.component_id,

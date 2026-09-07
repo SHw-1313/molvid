@@ -110,3 +110,13 @@ from /data4/users/sihao/workspace/PVB/outputs/state_detail_codec_v2/t0_data/clip
 through the target code, without copying or modifying the source worktree. The smoke reports this
 provenance explicitly; its randomly initialized codec and T0-derived statistics are not pilot
 inputs.
+
+## D018 — review-fix contracts remain local to the existing DiT path
+
+The 2026-09-07 review repair keeps the factorized DiT architecture and corrects three contracts
+in place: vector normalization and FFN operations are SO(3)-equivariant under nonzero residual
+gates; observed origins reuse the frozen codec's loss-masked frame-0 centroid; and conditional
+evaluation slices every future and temporal metric by the explicit history prefix. BF16 autocast
+is real CUDA-only execution policy, and all six latent-statistic tensors plus provenance are
+serialized with the checkpoint. These repairs do not authorize T1 data, a production pilot, or
+any later architecture work.

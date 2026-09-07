@@ -88,6 +88,160 @@ CPU correctness gate: PASS / FAIL / BLOCKED
 bounded CUDA gate: PASS / FAIL / NOT_RUN
 scientific R2/R4 comparison: NOT_RUN
 T1 test accessed: NO
+## Review-fix continuation — 2026-09-07
+
+### Code state and scope
+
+The repair started from reviewed commit
+`14f0f422a651126eec42d525dae55dbefb7bdd38` on `feat/dit-state-detail-probe-v1`, with base
+codec commit `23c6dbdd89a7b92c58b33edc9cf76aa82d0c5541`. The final repair is the focused commit
+created from this record; its exact hash is emitted by post-commit verification. The active T1
+checkout, processes, outputs, test split, and codec implementation remained read-only.
+
+Changed implementation and test files:
+
+- `module/molecular_dit.py`, `module/state_detail_latent_adapter.py`,
+  `module/latent_rectified_flow.py`, `module/__init__.py`
+- `trainer/dit_trainer.py`
+- `evaluation/codec_evaluation.py`, `evaluation/dit_evaluation.py`
+- `scripts/run_state_detail_dit_smoke.py`
+- `tests/dit_test_utils.py`, `tests/test_molecular_dit.py`,
+  `tests/test_state_detail_latent_adapter.py`, `tests/test_dit_trainer.py`,
+  `tests/test_dit_evaluation.py`, `tests/test_dit_cuda_correctness.py`
+- this phase's `DECISIONS.md`, `TASKS.md`, `HANDOFF.md`, and `OPERATOR_REVIEW.md`
+
+The original implementation packet and its evidence remain above unchanged. This section
+supersedes only old equivariance, origin, evaluator-history, AMP, statistics-persistence, and
+smoke-bookkeeping claims that the review invalidated.
+
+### Corrected contracts
+
+1. Vector normalization now contracts xyz into FP32 norms and the vector FFN uses only
+   axis-preserving bias-free maps with invariant scalar gates. Vector norms inform the scalar FFN,
+   scalars gate vector channels, and scalar q/k attention weights remain shared for scalar/vector
+   values. Nonzero spatial, temporal, and FFN AdaLN gates are exercised by the tests.
+2. H>0 observation origins use the frozen codec's `compute_masked_centroid_origin` over the
+   frame-0 `loss_mask`; H=0 uses an exact zero origin. Future coordinates and masked-out extreme
+   atoms cannot alter the condition, and observed decoded blocks remain in the codec gauge.
+3. Conditional evaluation explicitly reports observed `[0,H)`, future `[H,T)`, boundary
+   `[H-1,H)`, and full diagnostic `[0,T)` intervals. Future spatial and temporal metrics use
+   sliced trajectories, masks, and times; H=0 has no fabricated boundary.
+
+### Verification commands and results
+
+All successful Python commands below ran through `enter-container` with `conda activate torch-ito`.
+
+Focused repaired suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_state_detail_latent_adapter.py tests/test_latent_rectified_flow.py tests/test_molecular_dit.py tests/test_dit_trainer.py tests/test_dit_evaluation.py
+```
+
+Result after the final source edit and after smoke generation: `39 passed in 18.95s`.
+
+Complete suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -q -p no:cacheprovider
+```
+
+Result: `154 passed, 1 skipped, 1 warning in 15.40s`. The sole skip is the explicit CUDA-only
+test guard when `DIT_RUN_CUDA_CORRECTNESS` is unset; the pre-existing warning is the codec
+checkpoint test's `torch.load(weights_only=False)` FutureWarning. The CUDA test was run explicitly
+and passed, so this skip is not treated as CUDA evidence.
+
+Static checks passed: `py_compile` over all changed Python files, `git diff --check`, and a
+second compile of the two new evaluator/CUDA test files. The source audit found no
+target-coordinate, raw-Haar-detail, coordinate-derived graph, learned xyz-mixing, or unintended
+`.cpu()` path in the DiT input/trunk. CPU conversion remains limited to hashing, checkpoint
+serialization, and final scalar/JSON reporting.
+
+Explicit CUDA correctness on audited idle GPU 7:
+
+```text
+CUDA_VISIBLE_DEVICES=7 DIT_RUN_CUDA_CORRECTNESS=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_dit_cuda_correctness.py
+```
+
+Result: `1 passed in 17.41s`. It exercised CUDA FP32 forward/backward, nonzero-gate rotation and
+same-noise fixtures, masks/topology/origin/all fields, real BF16 autocast with activation dtype
+evidence, fresh checkpoint/statistics reconstruction, deterministic 8/16-step sampling, H=4/H=8
+evaluation, and nonzero finite gradients in all intended groups. GPU 7 was idle before and after;
+other active GPUs were not touched.
+
+### Final repaired T0 smoke evidence
+
+Exactly one two-optimizer-step smoke was run serially per candidate on GPU 7, with H=4 and the
+immutable T0-valid payload
+`/data4/users/sihao/workspace/PVB/outputs/state_detail_codec_v2/t0_data/clip_store/valid`.
+The target-worktree-relative payload was first checked and failed before model execution because
+its `data.bin` was absent; the existing source-worktree T0 payload was used read-only as already
+authorized by D017. No T1 data or test split was opened. These are execution evidence only, not
+scientific comparisons.
+
+| field | ratio2_state_detail | ratio4_state_detail |
+|---|---:|---:|
+| report | `outputs/dit_state_detail_probe_v1/review_fix_260907/ratio2_state_detail/smoke_report.json` | `outputs/dit_state_detail_probe_v1/review_fix_260907/ratio4_state_detail/smoke_report.json` |
+| wall seconds | 43.6597255 | 29.7499437 |
+| optimizer steps | 2 (including resume) | 2 (including resume) |
+| train step mean seconds | 5.3817530 | 2.6369080 |
+| train steps/s | 0.1858131 | 0.3792320 |
+| sampling seconds | 18.6488833 | 9.8733035 |
+| sampling samples/s | 0.1072450 | 0.2025664 |
+| combined sampling model evaluations | 24 | 24 |
+| trunk tokens/s | 18264.2572 | 17248.9380 |
+| end-to-end samples/s | 0.0458088 | 0.0672270 |
+| parameters | 11173120 | 11173120 |
+| peak allocated/reserved bytes | 3791333376 / 10856955904 | 2032064000 / 10856955904 |
+| autocast | CUDA BF16 | CUDA BF16 |
+| observed clamping | exact | exact |
+| 8/16-step decode | finite / finite | finite / finite |
+
+Both reports record exact sample IDs `atlas_5e3e_A_R1_w000049` and
+`atlas_5e3e_A_R1_w000050`, the same topology ID
+`5e3e_A::75184f3b9f0f379e56ff670b2f368df8ac39ee225ec62a1d8731a70f5dec1b80`, fresh six-tensor
+statistics recovery, unchanged frozen codec/frame-encoder hashes, and finite/nonzero gradients
+for spatial attention, temporal attention, scalar/vector FFN, AdaLN, adapter, and all four output
+heads. Both report H=4 intervals as observed `[0,4)`, future `[4,16)`, boundary `[3,4)`, and full
+diagnostic `[0,16)`.
+
+R2 hashes: codec
+`6d0b242a2cf7b4bf1b92c443fbde65dc43e6086f107bbe125920cfba64758d98`, frame
+`35b0cc04f1f71d12870ed6b3c27b6dd94cd1ffb29364cfc90df82293465c32aa`, statistics
+`2dfe02c0f8db7ead00441fd7d5ee311a8b2fad9d52cd7724fd27c34ec4e19bce`, adapter
+`3570a83ac0ca08d10af875ea7dc341d1e6ccee5783d78df6cce5e1f502a148dd`, model
+`c0621a4a8732d7c2f3f812e23b008b9d09216642a98eaf5b10d6cb9013cac44c`.
+
+R4 hashes: codec
+`e6706b3d38daa221a7e9458760999ff9d652c3bd5647f886d2cf89cfab868d54`, frame
+`8cd27004619765d4f2c3e6b954d80e7dcdfafa19246757dcea076408bbba4537`, statistics
+`a11f149d076e4e38082798c3887d95394a39f2033b75251a8472c10906147a5a`, adapter
+`0a63d96d401a721e50825d4272294e15fb8c125d901b00da589b8f44403b0970`, model
+`5a252516da5eab27569b542ba04f4c1dedf86a7a65e59fd738bb07603a964918`.
+
+The first/final total losses were R2 `3.4083285` / `3.0662241` and R4 `3.5162063` /
+`3.1409760`. Per-field initial/final losses were R2
+`(4.3647718, 4.0679617, 2.5738816, 2.6266994)` /
+`(3.7195108, 3.5214915, 2.4415779, 2.5823169)` and R4
+`(4.2918005, 4.2610207, 2.8383884, 2.6736155)` /
+`(3.6766608, 3.6511056, 2.5582311, 2.6779058)` in
+`(state_h, detail_h, state_v, detail_v)` order. These values are not a ratio ranking.
+
+### Remaining limitations and stop
+
+The smoke uses random T0 codec instances and T0-derived statistics solely for execution. There is
+no approved T1 codec checkpoint/statistics artifact, production pilot runner, train/validation
+selection, scientific R2/R4 result, or test evaluation. H=2 and partial-block observation remain
+unsupported. Dense block-level attention is still the declared initial backend. No full-T1
+training, T1 test access, DDP, static mixing, AF3/MSA, VAE/KL/VQ, CFG, energy guidance, ensemble,
+long rollout, or later architecture phase was started.
+
+implementation repair gate: PASS
+nonzero-gate SO(3) gate: PASS
+history-aware evaluation gate: PASS
+bounded CUDA gate: PASS
+scientific R2/R4 pilot: NOT_STARTED
+T1 test accessed: NO
+phase status: WAITING_FOR_T1_AND_OPERATOR_REVIEW
 real DiT pilot started: NO
 phase status: WAITING_FOR_T1_AND_OPERATOR_REVIEW
 operator decision requested: APPROVE_PILOT / REQUEST_FIX / REJECT_DESIGN

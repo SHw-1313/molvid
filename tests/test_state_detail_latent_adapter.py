@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
+from module.state_detail_codec_v2 import StateDetailCodecV2, compute_masked_centroid_origin
 from module.state_detail_latent_adapter import (
     LatentStatistics,
     StateDetailLatentAdapter,
@@ -66,6 +69,15 @@ def test_mask_aware_statistics_roundtrip_and_vector_has_no_mean() -> None:
     ).hash
 
 
+def test_all_four_latent_fields_must_be_finite() -> None:
+    batch = make_batch(2, width=4)
+    fields = batch.fields
+    bad = fields.detail_h.clone()
+    bad[0, 0, 0] = float("nan")
+    with pytest.raises(ValueError, match="all latent fields"):
+        batch.with_fields(type(fields)(fields.state_h, bad, fields.state_v, fields.detail_v))
+
+
 @pytest.mark.parametrize(("history", "ratio", "observed_tokens"), [
     (0, 2, 0), (4, 2, 2), (8, 2, 4),
     (0, 4, 0), (4, 4, 1), (8, 4, 2),
@@ -98,6 +110,75 @@ def test_partial_block_is_actionable_and_future_mutation_isolated() -> None:
     before = condition.sample_origin.clone()
     coordinates[4:] += 10000.0
     assert torch.equal(condition.sample_origin, before)
+
+
+def test_observation_origin_matches_codec_loss_mask_and_ignores_masked_future_atoms() -> None:
+    loss_mask = torch.tensor([True, False, True, True, True])
+    batch = make_batch(2, width=4, loss_mask=loss_mask)
+    coordinates = torch.zeros(16, batch.num_atoms, 3)
+    coordinates[0, 0] = torch.tensor([1.0, 2.0, 3.0])
+    coordinates[0, 1] = torch.tensor([1.0e6, -2.0e6, 3.0e6])
+    coordinates[0, 2] = torch.tensor([4.0, 5.0, 6.0])
+    coordinates[0, 3] = torch.tensor([7.0, 8.0, 9.0])
+    coordinates[0, 4] = torch.tensor([10.0, 11.0, 12.0])
+    condition = build_observation_condition(
+        batch,
+        history_frames=4,
+        coordinates=coordinates,
+        frame_mask=torch.ones(2, 16, dtype=torch.bool),
+    )
+    expected = compute_masked_centroid_origin(
+        coordinates,
+        frame_mask=torch.ones(2, 16, dtype=torch.bool),
+        abid=batch.abid,
+        atom_mask=loss_mask,
+    )
+    assert torch.equal(condition.sample_origin, expected)
+    before = condition.sample_origin.clone()
+    coordinates[0, 1] += 1.0e9
+    coordinates[4:] -= 1.0e9
+    assert torch.equal(condition.sample_origin, before)
+    zero_history = build_observation_condition(
+        batch, history_frames=0, coordinates=None, frame_mask=torch.ones(2, 16, dtype=torch.bool)
+    )
+    assert torch.equal(zero_history.sample_origin, torch.zeros_like(zero_history.sample_origin))
+
+
+def test_h_positive_origin_requires_loss_mask_when_not_carried_by_batch() -> None:
+    batch = make_batch(2, width=4)
+    batch.loss_mask = None
+    with pytest.raises(ValueError, match="loss_mask"):
+        build_observation_condition(
+            batch,
+            history_frames=4,
+            coordinates=torch.zeros(16, batch.num_atoms, 3),
+            frame_mask=torch.ones(2, 16, dtype=torch.bool),
+        )
+
+
+def test_clamped_observed_latent_decodes_in_the_codec_origin_gauge() -> None:
+    loss_mask = torch.tensor([True, False, True, True, True])
+    latent = make_latent(2, width=4)
+    adapter = StateDetailLatentAdapter(codec_width=4, scalar_width=8, vector_width=4, ratio=2)
+    batch = adapter.pack(latent, loss_mask=loss_mask)
+    coordinates = torch.randn(16, batch.num_atoms, 3)
+    condition = build_observation_condition(
+        batch,
+        history_frames=4,
+        coordinates=coordinates,
+        frame_mask=torch.ones(2, 16, dtype=torch.bool),
+    )
+    observed = torch.zeros_like(batch.token_mask)
+    observed[:, :2] = True
+    clamped_batch = batch.with_observation(
+        observed, sample_origin=condition.sample_origin
+    )
+    generated = adapter.make_generated_latent(clamped_batch, clamped_batch.fields)
+    codec_gauge_latent = replace(latent, sample_origin=condition.sample_origin)
+    codec = StateDetailCodecV2(4, mode="ratio2_state_detail")
+    reference = codec.decode(codec_gauge_latent).x_hat
+    decoded = codec.decode(generated).x_hat
+    assert torch.equal(decoded, reference)
 
 
 def test_history_and_frame_mask_validation() -> None:

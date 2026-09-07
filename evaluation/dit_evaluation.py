@@ -47,25 +47,24 @@ def trajectory_metrics(
     history_frames: Optional[int] = None,
 ) -> dict[str, Any]:
     """Reuse the corrected codec metrics and attach pilot-only report fields."""
-    result = dict(_metrics(prediction, target, batch))
-    result["rmsf"] = aligned_rmsf_metrics(prediction, target, batch)
-    result["dynamic"] = dynamic_acf_metrics(prediction, target, batch)
+    result = dict(_metrics(prediction, target, batch, history_frames=history_frames))
     if history_frames is None:
+        result["rmsf"] = aligned_rmsf_metrics(prediction, target, batch)
+        result["dynamic"] = dynamic_acf_metrics(prediction, target, batch)
         result["observation_boundary"] = {}
     else:
-        boundary = int(history_frames)
-        if boundary <= 0 or boundary >= prediction.shape[0]:
-            result["observation_boundary"] = {}
-        else:
-            result["observation_boundary"] = {
-                "history_frames": boundary,
-                "prediction_step_rmsd": float(
-                    (prediction[boundary] - prediction[boundary - 1]).square().mean().sqrt().detach().cpu()
-                ),
-                "target_step_rmsd": float(
-                    (target[boundary] - target[boundary - 1]).square().mean().sqrt().detach().cpu()
-                ),
-            }
+        temporal = result["temporal"]
+        result["rmsf"] = {
+            "observed": temporal["observed"]["rmsf"],
+            "future": temporal["future"]["rmsf"],
+            "full_diagnostic": temporal["full_diagnostic"]["rmsf"],
+        }
+        result["dynamic"] = {
+            "observed": temporal["observed"]["dynamic"],
+            "future": temporal["future"]["dynamic"],
+            "full_diagnostic": temporal["full_diagnostic"]["dynamic"],
+        }
+        result["observation_boundary"] = result["boundary"]
     return result
 
 
@@ -116,12 +115,13 @@ def evaluate_codec_oracle(
     batch: Any,
     *,
     device: str | torch.device | None = None,
+    history_frames: Optional[int] = None,
 ) -> dict[str, Any]:
     codec.eval()
     decoded = codec.decode(latent)
     prediction = _coordinates(decoded)
     target = torch.as_tensor(batch.x, device=prediction.device, dtype=prediction.dtype)
-    return trajectory_metrics(prediction, target, batch)
+    return trajectory_metrics(prediction, target, batch, history_frames=history_frames)
 
 
 @torch.no_grad()
@@ -129,6 +129,8 @@ def evaluate_generated_latent(
     codec: Any,
     generated_latent: Any,
     batch: Any,
+    *,
+    history_frames: Optional[int] = None,
 ) -> dict[str, Any]:
     codec.eval()
     start = time.perf_counter()
@@ -136,7 +138,7 @@ def evaluate_generated_latent(
     prediction = _coordinates(decoded)
     elapsed = time.perf_counter() - start
     target = torch.as_tensor(batch.x, device=prediction.device, dtype=prediction.dtype)
-    result = trajectory_metrics(prediction, target, batch)
+    result = trajectory_metrics(prediction, target, batch, history_frames=history_frames)
     result["decode_runtime_s"] = elapsed
     return result
 
@@ -150,9 +152,14 @@ def evaluate_oracle_vs_generated(
     latent_flow_loss: Optional[Mapping[str, float]] = None,
     trunk_runtime: Optional[Mapping[str, Any]] = None,
     diversity: Optional[Mapping[str, Any]] = None,
+    history_frames: Optional[int] = None,
 ) -> DiTEvaluationResult:
-    oracle = evaluate_codec_oracle(codec, oracle_latent, batch)
-    generated = evaluate_generated_latent(codec, generated_latent, batch)
+    oracle = evaluate_codec_oracle(
+        codec, oracle_latent, batch, history_frames=history_frames
+    )
+    generated = evaluate_generated_latent(
+        codec, generated_latent, batch, history_frames=history_frames
+    )
     return DiTEvaluationResult(
         codec_oracle=oracle,
         generated_result=generated,

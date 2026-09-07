@@ -12,6 +12,7 @@ from typing import Optional
 
 import math
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .state_detail_latent_adapter import (
@@ -30,6 +31,27 @@ def _safe_ids(value: Tensor, size: int) -> Tensor:
 
 def _sample_token_values(value: Tensor, abid: Tensor) -> Tensor:
     return value.index_select(0, abid).transpose(0, 1)
+
+
+class SO3ChannelNorm(nn.Module):
+    """Normalize vector channels with xyz-contracted, rotation-invariant norms."""
+
+    def __init__(self, channels: int, eps: float = 1.0e-6) -> None:
+        super().__init__()
+        if int(channels) < 1:
+            raise ValueError("SO3ChannelNorm channels must be positive")
+        self.channels = int(channels)
+        self.eps = float(eps)
+        self.scale = nn.Parameter(torch.ones(self.channels))
+
+    def forward(self, value: Tensor) -> Tensor:
+        if value.ndim < 3 or value.shape[-2] != 3 or value.shape[-1] != self.channels:
+            raise ValueError("SO3ChannelNorm expects [...,3,C] vector features")
+        input_dtype = value.dtype
+        value_fp32 = value.float()
+        denominator = value_fp32.square().mean(dim=-2, keepdim=True).add(self.eps).sqrt()
+        scale = self.scale.float().reshape((1,) * (value.ndim - 1) + (self.channels,))
+        return (value_fp32 / denominator * scale).to(dtype=input_dtype)
 
 
 class ScalarVectorAttention(nn.Module):
@@ -89,7 +111,7 @@ class AdaLNZero(nn.Module):
     def __init__(self, scalar_width: int, vector_width: int) -> None:
         super().__init__()
         self.scalar_norm = nn.LayerNorm(scalar_width, elementwise_affine=False)
-        self.vector_norm = nn.LayerNorm(vector_width, elementwise_affine=False)
+        self.vector_norm = SO3ChannelNorm(vector_width)
         self.modulation = nn.Linear(scalar_width, 3 * scalar_width + 2 * vector_width)
         nn.init.zeros_(self.modulation.weight)
         nn.init.zeros_(self.modulation.bias)
@@ -111,20 +133,20 @@ class ScalarVectorFFN(nn.Module):
         super().__init__()
         scalar_hidden = int(scalar_width * multiplier)
         vector_hidden = int(vector_width * multiplier)
-        self.scalar = nn.Sequential(
-            nn.Linear(scalar_width, scalar_hidden),
-            nn.SiLU(),
-            nn.Linear(scalar_hidden, scalar_width),
-        )
+        self.scalar_in = nn.Linear(scalar_width + vector_width, scalar_hidden)
+        self.scalar_out = nn.Linear(scalar_hidden, scalar_width)
         self.vector_in = AxisPreservingLinear(vector_width, vector_hidden)
         self.vector_out = AxisPreservingLinear(vector_hidden, vector_width)
-        self.vector_gate = nn.Linear(scalar_width, vector_width)
+        self.vector_gate = nn.Linear(scalar_hidden, vector_hidden)
 
     def forward(self, h: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
-        scalar = self.scalar(h)
-        vector = self.vector_out(torch.nn.functional.silu(self.vector_in(v)))
-        vector = vector * torch.sigmoid(self.vector_gate(h)).unsqueeze(-2)
-        return scalar, vector
+        vector_norm = v.float().square().sum(dim=-2).add(1.0e-6).sqrt().to(dtype=h.dtype)
+        scalar_hidden = F.silu(self.scalar_in(torch.cat((h, vector_norm), dim=-1)))
+        scalar = self.scalar_out(scalar_hidden)
+        vector_hidden = self.vector_in(v)
+        gate = torch.sigmoid(self.vector_gate(scalar_hidden)).unsqueeze(-2)
+        vector = self.vector_out(vector_hidden * gate)
+        return scalar, vector.to(dtype=v.dtype)
 
 
 class FactorizedDiTBlock(nn.Module):
@@ -205,7 +227,8 @@ def _block_spatial(
             local_v = all_v.index_select(0, index).unsqueeze(0)
             local_mask = torch.ones((1, index.numel()), device=h.device, dtype=torch.bool)
             context_h, context_v = attention(local_h, local_v, local_mask)
-            context_h, context_v = context_h[0], context_v[0]
+            context_h = context_h[0].to(dtype=h_out.dtype)
+            context_v = context_v[0].to(dtype=v_out.dtype)
             for local, global_index in enumerate(block_indices):
                 atom_indices = groups[global_index]
                 h_out[time_index, atom_indices] = context_h[local]
@@ -344,6 +367,8 @@ class MolecularDiT(nn.Module):
             "temporal_attention": "bidirectional",
             "vector_maps": "bias_free_channel_only",
             "vector_adaln": "scale_and_gate_only",
+            "vector_normalization": "so3_xyz_contracted_rms_fp32",
+            "ffn_interaction": "vector_norms_to_scalar_and_scalar_gated_vector",
         }
 
     @property
@@ -374,6 +399,7 @@ __all__ = [
     "AxisPreservingLinear",
     "FactorizedDiTBlock",
     "MolecularDiT",
+    "SO3ChannelNorm",
     "ScalarVectorAttention",
     "ScalarVectorFFN",
 ]
