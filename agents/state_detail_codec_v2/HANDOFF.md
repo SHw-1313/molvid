@@ -670,3 +670,63 @@ began.
 - Plot-only py_compile passed and the full regression suite remains 115 passed with the same
   pre-existing FutureWarning. The T0 report values and checkpoints are unchanged.
 - Phase status remains WAITING_FOR_OPERATOR_REVIEW; T1 remains NOT_STARTED.
+
+### 2026-09-04 — explicit T1 authorization and preflight GPU audit
+
+- The operator explicitly authorized the bounded T1 sequence without another confirmation:
+  freeze an independent 64-system 48/8/8 split; run four 200-step profiles; launch the four
+  complete one-seed controls only if all profiles pass; select ratio from validation only before
+  opening test; then add seeds only to the top two controls.
+- Current branch before T1 source work: `fix/state-detail-codec-v2-t1-gates`; HEAD
+  `c24e2576e2b57281c79ec142225e05a81ee87181`; remote
+  `https://github.com/SHw-1313/molvid.git`; worktree had only the authorized `AGENTS.md` edit.
+- Local GPU audit immediately before scheduling: idle and eligible physical GPUs were 1, 3, and
+  5 (A100-SXM4-80GB, 80 GiB each). GPU 0 had an existing process and GPUs 2, 4, 6, and 7 were
+  occupied; none were touched. `neibu` audit found remote GPUs 5, 6, and 7 idle while 0–4 had
+  active processes; none were touched. The remote worker will use an isolated designated
+  directory and the same `torch-ito` environment after code/data preflight.
+- T1 remains constrained to `torchmd_et`, frozen common frame weights, FP32, unchanged decoder,
+  losses, optimizer, and four existing codec control names. No later architecture phase has
+  started.
+
+### 2026-09-04 — pre-profile token-cap audit and corrected manifest
+
+- The first hash-ranked candidate manifest was not used: validation of the existing sampler found
+  186 oversized validation clips, including `atlas_2po4_A` at 8,521 atoms and T*N=136,336,
+  against the frozen `max_tokens=80,000` contract. No profile or training process started from
+  that candidate.
+- The source index audit found 522/546 token-valid train systems, 91/94 token-valid valid
+  systems, and 76/76 token-valid test systems after excluding the historical T0 systems. The
+  corrected manifest ranks only token-valid systems, keeps the existing source train/valid/test
+  system partitions, and selects 48/8/8 disjoint systems with all R1/R2/R3 and windows
+  w000000–w000061.
+- Corrected manifest/materialization root: `outputs/state_detail_codec_v2/t1/manifest_20260904_token80000`.
+  Its content hash, selected systems, source index hashes, and materialization hashes are
+  recorded in its JSON files. The old `manifest_20260904` directory is retained as an invalid
+  preflight record and is not used by any T1 command.
+
+### 2026-09-04 — T1 profile gate passed
+
+- Corrected manifest JSON SHA256: `88325925b339ef34a421d48b5439bfc869fb1003b9c59e3d7eeac45b62da3d2e`;
+  manifest content hash: `f8a764eb38e90c7485bf9799115d570bb868f34584ebbafab8c799fec03df4d2`;
+  materialization JSON SHA256: `41685082d85ff36ba442d09e23495c2f00110272f769f45c54e77207db3d85e8`;
+  materialization record hash: `5b622ae6d0ac2a6b498f3a9388bd2053dbb29cc8aca83eecf5723987c94d49c7`.
+- The final selected store contains 8,928 train, 1,488 validation, and 1,488 test clips,
+  corresponding to 48/8/8 systems, three replicas, and all 62 windows. Every selected clip has
+  `T*N <= 80,000`; train epochs sample 3,456 clips (24 per 144 trajectory) without replacement
+  within each epoch.
+- All four 200-step profiles passed on the same seed/config and frozen TorchMD source hash.
+  R1: result SHA256 `11e7a4e480a7c11bd27036dde080b0742432de68b12218eaaa9b62aaff316d0d`,
+  3.980 steps/s, 247,609 tok/s, 23.997 GiB allocated, estimated 3.20 h for 45,844 steps.
+  R2: `b671b4a4d954adfdf30336b14ccc188092be9dc3be79ac1051920822c4eed8d0`, 4.844 steps/s,
+  301,355 tok/s, 23.998 GiB, estimated 2.63 h. R4-SD:
+  `7d8bb2973897d2353809546fa7fd00c5b337155e782ecb60f27f7d64d0b30612`, 3.477 steps/s,
+  216,304 tok/s, 24.001 GiB, estimated 3.66 h. R4-Matched:
+  `b81043dd2931e91e2883456802ee0d2dadfb398f4694cd343b2e3ea89cc6592c`, 5.125 steps/s,
+  318,840 tok/s, 24.003 GiB, estimated 2.48 h.
+- Each profile saved a checkpoint and resumed exactly `200 -> 201`; all reported finite execution,
+  nonzero intended-module gradients, and unchanged frozen frame-encoder state. Local profiles
+  used physical GPUs 1/3/5; the matched profile used remote `neibu` physical GPU 5. No occupied
+  process was stopped or preempted.
+- The profile gate passed. Full one-seed T1 is authorized and is now launched in parallel; test
+  remains closed until the validation-only selection rule is frozen after the four runs.

@@ -15,6 +15,9 @@
 
 # Repair-phase generated evidence is external and must not enter Git.
 /outputs/state_detail_codec_v2/repair/
+# T1 manifests, logs, reports, plots, and external worker artifacts are
+# reproducibility outputs, not source-controlled model code.
+/outputs/state_detail_codec_v2/t1/
 /outputs/**/*.pth
 /outputs/**/*.ckpt
 /outputs/**/*.safetensors

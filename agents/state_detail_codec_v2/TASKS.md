@@ -118,15 +118,26 @@ Status legend: `[ ]` pending, `[-]` active, `[x]` complete, `[!]` blocked.
 - [x] S273 stop without preparing or running T1 or any DiT/static/full-data work — no T1 manifest
   or later architecture task was started.
 
-## T1 — not authorized until explicit later approval
+## T1 — explicitly authorized 2026-09-04
 
-- [!] S300 materialize the 64-system 48/8/8 split and manifest
-- [!] S301 benchmark 200 steps and freeze the 18–20 GPU-hour per-control budget
-- [!] S302 run the four one-seed T1 controls
-- [!] S303 evaluate validation, freeze selection rules, then evaluate test
+- [x] S300 materialize and independently verify the 64-system 48/8/8 system-level split and
+  frozen manifest — corrected token-valid manifest and 11,904 selected clip records are
+  materialized under `outputs/state_detail_codec_v2/t1/manifest_20260904_token80000`; exact
+  counts/hashes are in `manifest.json` and `materialization.json`
+- [x] S301 run four parallel 200-step profiles; verify throughput, peak memory, checkpoint
+  resume, and projected complete-run duration — all four passed; 45,844 projected steps and
+  approximately 2.48–3.66 h/control are recorded under `outputs/state_detail_codec_v2/t1/profiles_20260904`
+- [-] S302 after the profile gate, run the four complete one-seed T1 controls in parallel on
+  available idle local/`neibu` GPUs
+- [ ] S303 use validation only to freeze the ratio-selection rule, then open test evaluation
+- [ ] S304 after T1, run additional seeds only for the two controls ranked first by the frozen
+  validation rule
+- [ ] S305 append the T1 review packet, exact artifacts/hashes, limitations, and final
+  `WAITING_FOR_OPERATOR_REVIEW` stop record
 
-S300–S303 remain blocked even if S200–S273 pass. Only a later explicit operator approval may
-change their status.
+The operator explicitly authorized S300–S305 on 2026-09-04. GPU use may be parallelized across
+idle devices, but no other user's process may be stopped or preempted. No later architecture
+phase or T1 manifest broadening is allowed.
 
 ## Repair phase — T1 gates (2026-09-04)
 
@@ -182,3 +193,7 @@ control contracts remain binding. These tasks do not authorize T1.
 R210–R260 must not create a T1 manifest, select T1 systems, benchmark T1, or begin any later
 architecture/data/training phase. If the frozen-feature/no-anchor combination remains undecodable
 after the bounded repair, mark the repair blocked with exact evidence and stop without T0 repeat.
+
+The preceding repair stop was satisfied by the historical packet. Its no-T1 restriction was
+superseded for S300–S305 only by the explicit operator authorization recorded in D26; all other
+scope and safety restrictions remain active.

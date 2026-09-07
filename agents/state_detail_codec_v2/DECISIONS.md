@@ -156,3 +156,24 @@ The repaired R1 gate runs exactly 1,000 optimizer steps on the same one-sample c
 optimizer and reconstruction metrics every 25 steps including step zero, and saves/resumes the
 final checkpoint for one additional optimizer step.  The 1,000-step budget and D24 thresholds
 are frozen before inspecting this repaired result; no ratio smoke or T0 repeat is implied.
+
+### D26 — explicit authorization for bounded T1 execution (2026-09-04)
+
+The operator explicitly authorized the T1 sequence after the repaired T0 review packet and
+removed the requirement for another confirmation before launching the complete runs. The worker
+must freeze an independent 64-system 48/8/8 system-level split, run four 200-step profiles, and
+launch the four one-seed full controls in parallel only after all profiles pass. Ratio selection
+uses validation only; the selection rule is frozen before test evaluation is opened. After T1,
+additional seeds are run only for the top two controls. Idle local and `neibu` GPUs may be used
+in parallel, but no existing process may be killed, preempted, or otherwise disrupted. This
+authorization does not permit any later architecture phase or T1 broadening.
+
+### D27 — token-valid T1 system eligibility (2026-09-04)
+
+The first hash-ranked 64-system candidate set failed the pre-profile sampler audit because
+some selected clips had `frames*atoms > 80000`. The frozen `max_tokens=80000` contract is not
+relaxed and systems are not partitioned or dropped after selection. The corrected manifest ranks
+only systems for which all 186 native R1/R2/R3 windows satisfy `frames*atoms <= 80000`, still
+selects 48/8/8 from the existing source-level train/valid/test partitions, excludes the three
+historical T0 systems, and records the eligibility counts and per-system maximum atom counts.
+The initial invalid candidate manifest remains preserved as preflight evidence and is not used.

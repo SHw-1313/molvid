@@ -2,7 +2,7 @@
 
 ## Active implementation phase
 
-The active phase is **state/detail codec v2 T1-gates repair and bounded T0 repeat**.
+The active phase is **state/detail codec v2 authorized T1 experiment**.
 
 Before editing code, read the preceding phase documents as immutable historical context, then
 the current prompt and new phase documents in this order:
@@ -41,20 +41,24 @@ not be overwritten or repurposed.
 
 ## Scope discipline
 
-This repair phase addresses coordinate-independent latent topology metadata, no-anchor coordinate
-reconstruction, evaluator correctness, true single-clip evidence, and a bounded repeat of the
-three-system/nine-trajectory T0. It preserves the accepted deterministic zero-preserving
-state/detail algebra and uses the existing `torchmd_et` frame encoder. Keep ViSNet v1/v2 and
-state/detail v2 historical contracts, checkpoints, reports, and result files reproducible.
+The operator explicitly authorized the T1 gates after the repaired T0 packet on 2026-09-04.
+Execute only this frozen sequence: materialize and verify an independent-system 48/8/8 split
+over 64 systems; run four 200-step profiles; launch the four complete one-seed controls only if
+all profiles pass; select a ratio using validation only; freeze the selection rule before opening
+test; then run an additional seed only for the top two controls. Every new run uses the existing
+`torchmd_et` frame encoder, the fixed state/detail contracts, and the unchanged data/loss/
+optimizer/decoder protocol unless the operator explicitly changes it.
 
-Do not create a T1 manifest or run T1, static/dynamic large-data training, DiT, observation
-adapter, forecasting, rollout, AF3/MSA conditioning, VAE/KL/VQ, scaling-law, full-data, or any
-later architecture work. After the T0 operator review packet is complete, set phase status to
-`WAITING_FOR_OPERATOR_REVIEW` and stop; no later task may start without explicit operator approval.
+Do not start any later architecture work: DiT, observation adapter, forecasting, rollout,
+AF3/MSA conditioning, VAE/KL/VQ, scaling-law, or unrelated full-data work. Do not broaden the
+T1 matrix, use test results for selection, or start the complete runs before the profile gate.
+After the authorized T1 sequence and its review packet are complete, set phase status to
+`WAITING_FOR_OPERATOR_REVIEW` and stop.
 
 ## Documentation ownership
 
-- `AGENTS.md`: this required S201 transition is authorized; otherwise preserve it.
+- `AGENTS.md`: this transition records the explicit operator T1 authorization; otherwise preserve
+  it.
 - v1/v2 phase files and artifacts: read-only historical evidence; never rewrite them.
 - `agents/state_detail_codec_v2/PLAN.md` and `ACCEPTANCE.md`: the approved original text is
   immutable; append only the repair addendum required by the active repair prompt to `PLAN.md`.
@@ -63,8 +67,8 @@ later architecture work. After the T0 operator review packet is complete, set ph
 - `agents/state_detail_codec_v2/TASKS.md`: update task status and attach concise evidence.
 - `agents/state_detail_codec_v2/HANDOFF.md`: append dated commands, tests, outputs, blockers,
   metrics, and next task.
-- `agents/state_detail_codec_v2/OPERATOR_REVIEW.md`: preserve the previous review as history and
-  fill the repair result section only with observed evidence after the repeated T0.
+- `agents/state_detail_codec_v2/OPERATOR_REVIEW.md`: preserve prior reviews as history and append
+  only observed T1 profile/training/evaluation evidence.
 
 Do not begin coding by rewriting the plan. Execute the prepared state/detail plan, and do not change
 acceptance thresholds to make a failing result pass.
