@@ -25,3 +25,4 @@ from .codec_trainer import (
     TimeBucketSpec,
     validate_codec_config,
 )
+from .dit_trainer import DIT_CHECKPOINT_SCHEMA, DiTTrainConfig, DiTTrainer

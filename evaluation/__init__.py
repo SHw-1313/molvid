@@ -14,3 +14,12 @@ from .codec_evaluation import (
     report_markdown,
     write_report,
 )
+from .dit_evaluation import (
+    DIT_EVALUATION_SCHEMA,
+    DiTEvaluationResult,
+    diversity_diagnostics,
+    evaluate_codec_oracle,
+    evaluate_generated_latent,
+    evaluate_oracle_vs_generated,
+    trajectory_metrics,
+)
