@@ -73,3 +73,30 @@ The final status must be `WAITING_FOR_T1_AND_OPERATOR_REVIEW`, followed by a sto
 
 Do not weaken acceptance criteria, add compatibility fallbacks, or continue after the required
 operator-review stop.
+
+## Active pilot transition — R2/R4 state-detail latent DiT T1 pilot v1
+
+This separate branch/worktree is explicitly authorized for the matched 64-system pilot described
+in `agents/dit_state_detail_pilot_v1/PILOT_PROTOCOL.md`. It is based on repair commit
+`28a499f4c03deb4647a6468a5c477bd8eda8d62f` from `feat/dit-state-detail-probe-v1`; the repair
+branch remains independently reviewable and must not be modified from this worktree.
+
+- The frozen manifest is `/data4/users/sihao/workspace/PVB/outputs/state_detail_codec_v2/t1/manifest_20260904_token80000`.
+- Only the manifest's train and validation materializations may be opened. Never construct,
+  read, hash, or evaluate `clip_store/test`; no test split access is authorized tonight.
+- Only the completed, SHA256-verified T1 `ratio2_state_detail` and `ratio4_state_detail`
+  checkpoints named in the pilot protocol may be loaded. Random, T0, incomplete, or guessed
+  codec checkpoints are prohibited.
+- The frozen codec and frame encoder stay in eval mode and frozen. The shared DiT width/depth/
+  heads, optimizer policy, ordered schedule, H=4/H=8 schedule, and validation protocol are
+  identical for R2 and R4. No H=2, H=0 training, DDP, static mixing, AF3/MSA, architecture
+  changes, or test evaluation.
+- Real-data pilot outputs belong under `outputs/dit_state_detail_pilot_v1/`; do not write under
+  active T1 output roots or commit checkpoints, datasets, caches, or binary plots.
+- Every Python, test, profile, training, evaluation, and plotting command still runs through
+  `enter-container` with `conda activate torch-ito`. Use only audited idle GPUs and never
+  preempt another process.
+- Freeze one common step budget in `pilot_budget.json` only after both 200-step profiles pass;
+  require the common budget to be at least 1000 steps. Validation RF loss selects checkpoints;
+  do not declare an R2/R4 winner.
+- The pilot branch's final status is `WAITING_FOR_OPERATOR_REVIEW`; test remains sealed.

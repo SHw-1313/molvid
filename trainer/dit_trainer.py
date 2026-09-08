@@ -70,8 +70,11 @@ class DiTTrainConfig:
             raise ValueError("depth, heads, and ffn_multiplier must be positive")
         if self.scalar_width % self.heads or self.vector_width % self.heads:
             raise ValueError("model widths must be divisible by heads")
-        if self.max_steps < 1 or self.max_steps > 100:
-            raise ValueError("the bounded probe allows at most 100 optimizer steps")
+        max_steps_limit = 5000 if self.metadata.get("phase") == "t1_pilot" else 100
+        if self.max_steps < 1 or self.max_steps > max_steps_limit:
+            raise ValueError(
+                f"the configured DiT phase allows at most {max_steps_limit} optimizer steps"
+            )
         if not self.observation_mixture or any(value not in (0, 4, 8) for value in self.observation_mixture):
             raise ValueError("observation mixture must contain only H=0,4,8")
         if self.output_root.startswith("outputs/state_detail_codec_v2"):
