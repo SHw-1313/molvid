@@ -254,6 +254,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     selection = json.loads(selection_path.read_text(encoding="utf-8")) if selection_path.is_file() else None
     test_path = selection_root / "test_evaluation.json"
     test = json.loads(test_path.read_text(encoding="utf-8")) if test_path.is_file() else None
+    test_all_path = selection_root / "test_evaluations_all.json"
+    test_all = json.loads(test_all_path.read_text(encoding="utf-8")) if test_all_path.is_file() else None
     additional: dict[str, dict[str, Any]] = {}
     if seeds_root.is_dir():
         for path in sorted(seeds_root.glob("*/result.json")):
@@ -268,6 +270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "one_seed_rows": rows,
         "validation_selection": selection,
         "selected_test": test,
+        "all_control_test": test_all,
         "additional_seed_results": additional,
         "limitations": [
             "one frozen system-level 48/8/8 split",
@@ -320,8 +323,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "",
             f"- Validation selection packet: `{selection_path}`.",
             f"- Selected control: `{selection['selected_mode'] if selection else 'pending'}`.",
-            f"- Test packet: `{test_path if test else 'not opened'}`.",
-            "- The test metric is not used to choose the ratio.",
+            f"- All-control test packet: `{test_all_path if test_all else 'not opened'}`.",
+            f"- Selected-control test packet: `{test_path if test else 'not opened'}`.",
+            "- All four controls were evaluated on the same frozen test split after the validation-only rule was frozen; test metrics were not used to choose the ratio.",
             "",
             "## Plots",
             "",
