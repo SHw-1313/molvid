@@ -10,12 +10,62 @@
   repaired schedule-hash contract and completed both candidates under `profiles_20260908_fix2`
 - [x] P005 freeze and record one common `pilot_budget.json`; two idle GPUs were available and the
   common budget is `S=4500` (>=1000)
-- [ ] P006 run the matched R2/R4 pilot with the common seed, schedule, and step budget without
-  opening test
-- [ ] P007 select checkpoints by validation RF loss and evaluate the fixed all-eight-system
+- [x] P006 run the matched R2/R4 pilot with the common seed, schedule, and step budget without
+  opening test; both candidates reached the frozen target `S=4500` and passed checkpoint resume
+- [x] P007 select checkpoints by validation RF loss and evaluate the fixed all-eight-system
   validation subset for H=4/H=8 future metrics and codec-oracle generation gaps
-- [ ] P008 append exact commands, hashes, profiles, losses, checkpoints, warnings, and final
+- [x] P008 append exact commands, hashes, profiles, losses, checkpoints, warnings, and final
   operator-review status; do not declare a ratio winner
+
+## 2026-09-09 — P006/P007/P008 matched pilot completion
+
+The matched pilot completed for both candidates from implementation commit
+`761e6fb634a6eff916f9ee3386f91bffa7fc14ce`, using seed `20260907`, the frozen common budget
+`S=4500`, identical ordered H=4/H=8 training and validation schedules, and train/validation-only
+stores. Both reports have `status=PASS`, `target_steps=4500`, `test_opened=false`, and a fresh
+resume check from step 4500 to step 4501. The report field `completed_steps=4100` is the selected
+best-checkpoint metadata; validation history and the resume check reached the frozen 4500-step
+target. Both selected checkpoints were chosen by validation RF loss only:
+
+- R2: `outputs/dit_state_detail_pilot_v1/full_20260908_S4500/ratio2_state_detail/seed20260907_S4500/best_validation.pt`
+- R4: `outputs/dit_state_detail_pilot_v1/full_20260908_S4500/ratio4_state_detail/seed20260907_S4500/best_validation.pt`
+
+Final report paths are the corresponding `pilot_summary.json` files under the same two candidate
+directories. Their approved codec checkpoint hashes are R2
+`b15cb92c34aec0e0f0c44e796def518d7ad89cda3dbc7f2fc3de83d55b4c64e9` and R4
+`ba10c44189cca837430abbd64afce2109a0daf0bda4f05971e0441abb2a5e6df`; codec state hashes are R2
+`8473e5c8ff6d13567d73d868b3a569499a7257069dad1c8d153b610aa6e6abc0` and R4
+`9a30e3838403cbd9f2cfa7344276cbdc7a8176d75ce5d4da028a3ea39ec390b9`. The common T1 train data
+hash is `9daaf83fe5ee862634f7d1d3530e730adb4a8529ed37a2bc2fd330304ebfe184`. Statistics were
+reported as `production_t1_train_only`; their hashes are R2
+`2dc3541483afb823fd264f48276b7a7e39cba253d7db36cac566cd38729c0e1c` and R4
+`34733304618c1ffdd009bc6d78d3a8d83ea11b4d0625919d79dbfee8a1aee993`.
+
+The fixed validation subset contains all eight validation systems, all three replicas, windows
+0/30/61, 72 clips, and 144 H=4/H=8 history evaluations. The report protocol is explicit for
+each conditional evaluation: observed `[0,H)`, future `[H,16)`, boundary `[H-1,H)`, and full
+`[0,16)` diagnostic. Future metrics and generation gaps were:
+
+| candidate | H | future aligned RMSD | future dRMSD | generation gap aligned RMSD | generation gap dRMSD |
+|---|---:|---:|---:|---:|---:|
+| R2 | 4 | 3.1695463526 | 2.5373122834 | 3.1470176881 | 2.5150342596 |
+| R2 | 8 | 3.0175429412 | 2.3996681333 | 2.9950194820 | 2.3774038546 |
+| R4 | 4 | 3.1684368944 | 2.6287575211 | 3.1470976002 | 2.6099774709 |
+| R4 | 8 | 3.0011343126 | 2.4643223515 | 2.9797902245 | 2.4455289090 |
+
+Runtime evidence: R2 wall `58444.19946962781` s, optimizer mean `11.128112767636466` s/step,
+train throughput `0.08649004534495383` steps/s, peak allocated/reserved
+`26781804032/84477476864` bytes; R4 wall `30622.021786798257` s, optimizer mean
+`5.482367828324851` s/step, train throughput `0.1688784381198368` steps/s, peak
+allocated/reserved `26356072960/84477476864` bytes. Both ran on NVIDIA A100-SXM4-80GB with
+BF16 autocast, and the generated reports include fresh statistics/checkpoint recovery and the
+frozen codec/frame-encoder hash checks.
+
+These are real-T1 execution and validation evidence only. They do not rank R2 versus R4 or select
+a scientific winner. The full output directories, checkpoints, statistics artifacts, and large
+JSON reports remain untracked and were not staged. A push of the pilot branch was attempted once
+but was blocked by the environment's network-export safety review; no workaround or repeat was
+performed. Final phase status remains `WAITING_FOR_OPERATOR_REVIEW`.
 
 ## 2026-09-08 — P003/P004 execution evidence and repair
 
