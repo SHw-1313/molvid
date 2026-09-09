@@ -91,5 +91,5 @@ The model-only median speedups are approximately 75x, 71x, 101x, and 142x for R4
 
 - No production checkpoint or large binary artifact was written or staged.
 - No formal scientific training, 4500-step run, conditional-prior model, evaluator change, or test-split read was performed.
-- Local commit hash will be appended below after the explicit final stage/commit review.
+- Implementation commit: efe0d39 (local only; no push).
 - Stop at operator review; do not merge A or push.
