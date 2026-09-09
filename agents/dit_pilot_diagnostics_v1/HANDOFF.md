@@ -1,6 +1,6 @@
 # A handoff
 
-Status: NOT_STARTED
+Status: A_DIAGNOSTICS_READY_FOR_REVIEW
 
 此文件当前是模板，未运行任何测试或评测。
 
@@ -86,4 +86,7 @@ Status: `A_DIAGNOSTICS_READY_FOR_REVIEW`
 - A-owned records: this file, `DECISIONS.md`, `TASKS.md`, and the root Session A transition in `AGENTS.md`.
 - Full local outputs: `outputs/dit_state_detail_diagnostics_v1/session_a_260909/` (large JSONL/deep summaries remain untracked/local).
 - Small report/evidence files are staged separately under `agents/dit_pilot_diagnostics_v1/evidence/`.
-- Local commit hash: to be recorded after the focused commit; stop after local review.
+- Local source/config/test commit: `a25e6bf66214a82adf9a56d492a85a28207ef248` (`diagnostics: add Session A checkpoint evaluation`).
+- Compact evidence files: `agents/dit_pilot_diagnostics_v1/evidence/session_a_260909_summary.json` and `agents/dit_pilot_diagnostics_v1/evidence/session_a_260909_report.md`.
+- Generated report was rerun after the source commit and records `actual_code_commit=a25e6bf66214a82adf9a56d492a85a28207ef248`.
+- The follow-up local documentation/evidence commit is the next commit in this branch history; no push is authorized.

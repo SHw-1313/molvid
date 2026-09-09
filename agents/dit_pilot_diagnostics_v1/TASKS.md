@@ -7,7 +7,7 @@
 - [x] A003 实现tau/latent/perturbation/field-swap/8-vs16/multi-draw诊断。Evidence: both deep summaries completed after the vector-mask fix.
 - [x] A004 targeted CUDA数值测试与R4/R2真实clip smoke；只跑受影响回归。Evidence: CUDA diagnostics test ran (not skipped), both real-candidate smoke reports passed, affected regression subset passed 49 tests.
 - [x] A005 执行72-clip main + 8-clip deep，保留逐项状态与输入输出hash。Evidence: R2/R4 main each 720 rows/72 samples/8 systems; R2/R4 deep each sample_count=8, test_opened=false, optimizer_steps=0.
-- [x] A006 小型报告、DECISIONS/HANDOFF更新、diff检查、本地明确范围commit，停止。Evidence: small evidence is being staged with the local repair/diagnostics commit; no push, merge, B, or training.
+- [x] A006 小型报告、DECISIONS/HANDOFF更新、diff检查、本地明确范围commit，停止。Evidence: source/config/test commit `a25e6bf66214a82adf9a56d492a85a28207ef248`; compact JSON/Markdown evidence is recorded under `agents/dit_pilot_diagnostics_v1/evidence/`; no push, merge, B, or training.
 
 Current status: A_DIAGNOSTICS_READY_FOR_REVIEW
 

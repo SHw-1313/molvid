@@ -1,0 +1,77 @@
+{
+  "schema": "pvb.dit.state_detail.diagnostics.evidence.v1",
+  "run_id": "session_a_260909",
+  "status": "A_DIAGNOSTICS_READY_FOR_REVIEW",
+  "branch": "exp/dit-state-detail-t1-pilot-v1",
+  "source_commit": "a25e6bf66214a82adf9a56d492a85a28207ef248",
+  "worktree": "/data4/users/sihao/workspace/molvid-dit-state-detail-pilot-v1",
+  "device": "GPU0 NVIDIA A100-SXM4-80GB",
+  "cuda_runtime": "12.1",
+  "torch": "2.5.1+cu121",
+  "autocast": "bfloat16 for DiT inference; FP32 metric accumulation",
+  "manifest": {
+    "path": "/data4/users/sihao/workspace/PVB/outputs/state_detail_codec_v2/t1/manifest_20260904_token80000",
+    "input_hash": "b478d9fbe6721847f62767940dc0481753ea3c4f1e26573e49a78a76379e3948",
+    "systems": {"train": 48, "validation": 8, "test": 8},
+    "clips": {"train": 8928, "validation": 1488, "test": 1488},
+    "test_sampling_opened": false
+  },
+  "candidate_artifacts": {
+    "ratio2_state_detail": {
+      "codec_sha256": "b15cb92c34aec0e0f0c44e796def518d7ad89cda3dbc7f2fc3de83d55b4c64e9",
+      "best_validation_sha256": "2d48363d272d0768281948df13e20d068b9da3a86fd3ece1540cdd8e6d173771",
+      "statistics_sha256": "5c167678596cd2169b926604b71db8481deea120f185cb1ed8749ab0217d256c"
+    },
+    "ratio4_state_detail": {
+      "codec_sha256": "ba10c44189cca837430abbd64afce2109a0daf0bda4f05971e0441abb2a5e6df",
+      "best_validation_sha256": "bbd9c3710addecc05c0ecf41cd779b0ceaebcd4ed5f2e1bbd80e482e0b523992",
+      "statistics_sha256": "4d07bf53f317a6f2937a027695d2d70993674903d0fcefc1fa49e0482a529583"
+    }
+  },
+  "evaluation": {
+    "history_frames": [4, 8],
+    "future_interval": "[H,16)",
+    "boundary_interval": "[H-1,H)",
+    "main": {"samples_per_candidate": 72, "systems_per_candidate": 8, "rows_per_candidate": 720},
+    "deep": {"samples_per_candidate": 8, "draws": 4, "solver_steps": [8, 16]},
+    "optimizer_steps": 0,
+    "test_access": false
+  },
+  "main_metrics": {
+    "ratio2_state_detail": {
+      "H4": {
+        "codec_oracle_aligned_rmsd": 0.022262,
+        "latent_block_state_persistence_aligned_rmsd": 1.839056,
+        "latent_block_state_persistence_contact_f1": 0.883476,
+        "dit_generated_aligned_rmsd": 3.143703,
+        "dit_generated_contact_f1": 0.476665
+      },
+      "H8": {
+        "latent_block_state_persistence_aligned_rmsd": 1.713070,
+        "dit_generated_aligned_rmsd": 2.999910,
+        "dit_generated_contact_f1": 0.488822
+      }
+    },
+    "ratio4_state_detail": {
+      "H4": {
+        "codec_oracle_aligned_rmsd": 0.021208,
+        "latent_block_state_persistence_aligned_rmsd": 1.806715,
+        "latent_block_state_persistence_contact_f1": 0.887753,
+        "dit_generated_aligned_rmsd": 3.136344,
+        "dit_generated_contact_f1": 0.491055
+      },
+      "H8": {
+        "latent_block_state_persistence_aligned_rmsd": 1.685781,
+        "dit_generated_aligned_rmsd": 2.985527,
+        "dit_generated_contact_f1": 0.501076
+      }
+    }
+  },
+  "decision": {
+    "prior_baseline_usable": "reference_only_not_deployable",
+    "winner": null,
+    "reason": "For both candidates, generated future geometry/contact metrics are worse than the observed-only latent state persistence control; diagnostics do not select R2 or R4.",
+    "scientific_pilot_started": false
+  },
+  "excluded_attempt": "The first R4 deep attempt was excluded after a latent-summary vector-mask broadcasting error; the fix and regression test were committed before the successful R4/R2 deep reruns."
+}
