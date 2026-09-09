@@ -539,6 +539,7 @@ def _build_trainer(
     seed: int,
     output_root: Path,
     device: torch.device,
+    execution_backend: str = "reference",
 ) -> DiTTrainer:
     config = DiTTrainConfig(
         ratio=codec.ratio,
@@ -567,6 +568,7 @@ def _build_trainer(
         heads=8,
         ffn_multiplier=4,
         dropout=0.0,
+        execution_backend=execution_backend,
     ).to(device)
     return DiTTrainer(
         model,
@@ -887,6 +889,7 @@ def _resume_check(
     target_steps: int,
     output_root: Path,
     device: torch.device,
+    execution_backend: str = "reference",
 ) -> dict[str, Any]:
     fresh_adapter = StateDetailLatentAdapter(
         codec_width=128,
@@ -904,6 +907,7 @@ def _resume_check(
         seed=seed,
         output_root=output_root,
         device=device,
+        execution_backend=execution_backend,
     )
     resume_cursor, _history = _restore_resume(
         fresh_trainer,
@@ -972,6 +976,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--run-name", default="")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--execution-backend", choices=("reference", "factorized_v2"), default="reference")
     parser.add_argument("--seed", type=int, default=20260907)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--profile", action="store_true")
@@ -1054,6 +1059,7 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
         output_root=output_root,
         device=device,
+        execution_backend=args.execution_backend,
     )
     cursor = {"epoch": 0, "batch_index": 0}
     validation_history: list[dict[str, Any]] = []
@@ -1093,7 +1099,7 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("training schedule hash changed")
         history_frames = HISTORY_SCHEDULE[(trainer.step) % len(HISTORY_SCHEDULE)]
         iteration_started = time.perf_counter()
-        _latent, _batch_cpu, batch = _encode_batch(
+        latent, _batch_cpu, batch = _encode_batch(
             data.train,
             indices,
             codec=codec,
@@ -1102,7 +1108,7 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
             device=device,
         )
         latent_batch = adapter.pack(
-            codec.model.encode(batch),
+            latent,
             codec_hash=codec.codec_state_hash,
             data_hash=data.data_hash,
             loss_mask=batch.loss_mask,
@@ -1200,6 +1206,7 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
         target_steps=int(args.steps),
         output_root=output_root,
         device=device,
+        execution_backend=args.execution_backend,
     )
     generated = None
     if args.evaluate_generated:
@@ -1224,6 +1231,7 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
         "schema": PILOT_SCHEMA,
         "status": "PASS",
         "profile": bool(args.profile),
+        "execution_backend": args.execution_backend,
         "candidate": args.candidate,
         "ratio": codec.ratio,
         "seed": int(args.seed),

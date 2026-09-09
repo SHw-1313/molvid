@@ -23,6 +23,11 @@ from .state_detail_latent_adapter import (
     StateDetailLatentAdapter,
     contract_hash,
 )
+from .dit_backend_v2 import (
+    FactorizedLayout,
+    build_factorized_layout,
+    factorized_block_forward,
+)
 
 
 def _safe_ids(value: Tensor, size: int) -> Tensor:
@@ -273,6 +278,7 @@ class MolecularDiT(nn.Module):
         max_atom_type: int = 128,
         max_block_type: int = 256,
         max_component_type: int = 128,
+        execution_backend: str = "reference",
     ) -> None:
         super().__init__()
         self.adapter = adapter
@@ -282,6 +288,12 @@ class MolecularDiT(nn.Module):
         self.heads = int(heads)
         self.ffn_multiplier = int(ffn_multiplier)
         self.dropout = float(dropout)
+        if execution_backend not in ("reference", "factorized_v2"):
+            raise ValueError("execution_backend must be 'reference' or 'factorized_v2'")
+        if execution_backend == "factorized_v2" and self.dropout != 0.0:
+            raise ValueError("factorized_v2 requires dropout=0 for shared-mask parity")
+        self.execution_backend = str(execution_backend)
+        self._factorized_layout: Optional[FactorizedLayout] = None
         if min(self.scalar_width, self.vector_width, self.depth, self.heads) < 1:
             raise ValueError("model widths, depth, and heads must be positive")
         if self.scalar_width % self.heads or self.vector_width % self.heads:
@@ -336,6 +348,13 @@ class MolecularDiT(nn.Module):
         condition = condition + self.block_embedding(_safe_ids(batch.block_type, self.block_embedding.num_embeddings)).unsqueeze(0)
         condition = condition + self.component_embedding(_safe_ids(batch.component_id, self.component_embedding.num_embeddings)).unsqueeze(0)
         return condition
+    def _layout_for(self, batch: DiTLatentBatch) -> FactorizedLayout:
+        layout = self._factorized_layout
+        if layout is None or not layout.matches(batch):
+            layout = build_factorized_layout(batch)
+            self._factorized_layout = layout
+        return layout
+
 
     def forward(self, batch: DiTLatentBatch, tau: Tensor | float) -> LatentFieldSet:
         if batch.ratio != self.adapter.ratio or batch.mode != self.adapter.mode:
@@ -343,9 +362,16 @@ class MolecularDiT(nn.Module):
         h, v = self.adapter.project_inputs(batch)
         condition = self._condition(batch, torch.as_tensor(tau, device=h.device, dtype=h.dtype))
         h = h + condition
-        groups, group_samples = _build_block_groups(batch)
-        for block in self.blocks:
-            h, v = block(h, v, condition, batch, groups, group_samples)
+        if self.execution_backend == "reference":
+            groups, group_samples = _build_block_groups(batch)
+            for block in self.blocks:
+                h, v = block(h, v, condition, batch, groups, group_samples)
+        else:
+            layout = self._layout_for(batch)
+            for block in self.blocks:
+                h, v = factorized_block_forward(
+                    block, h, v, condition, batch, layout
+                )
         output = self.adapter.project_outputs(h, v)
         return _masked_output(output, batch)
 
@@ -378,6 +404,16 @@ class MolecularDiT(nn.Module):
     @property
     def model_hash(self) -> str:
         return contract_hash(self.contract())
+    @property
+    def semantic_contract_hash(self) -> str:
+        return self.model_hash
+
+    def execution_contract(self) -> dict[str, str]:
+        return {
+            "execution_backend": self.execution_backend,
+            "semantic_contract_hash": self.semantic_contract_hash,
+        }
+
 
     @property
     def parameter_count(self) -> int:
