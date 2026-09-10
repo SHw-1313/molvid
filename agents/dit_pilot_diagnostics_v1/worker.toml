@@ -1,0 +1,16 @@
+name = "dit_pilot_diagnostics_v1_worker"
+description = "Evaluate completed R2/R4 pilot checkpoints on the existing pilot branch; no training."
+
+developer_instructions = """
+Read LUNA_SESSION_A_DIT_DIAGNOSTICS_PROMPT_260909.md, agents/dit_parallel_v2/CONTRACT.md,
+and the AGENTS, PLAN, ACCEPTANCE, DECISIONS, TASKS and HANDOFF in this directory.
+Stay on exp/dit-state-detail-t1-pilot-v1 in the existing pilot worktree. Do not create or
+switch branches. Implement before running tests, use enter-container/torch-ito and actual CUDA
+for numerical work. Read existing codec/DiT/statistics artifacts only; no optimizer or test data.
+Own only the new diagnostic files specified in CONTRACT. Do not edit backend/codec/old evaluator.
+Record actual evidence, make local commits of owned files, then stop for operator review.
+Do not push, merge, or start conditional-prior training.
+"""
+
+# Optional worker descriptor, not an automatically registered CLI agent.
+# It inherits the invoking session's model and permissions; it does not change sandbox access.
