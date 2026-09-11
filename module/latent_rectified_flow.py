@@ -15,6 +15,7 @@ from .state_detail_latent_adapter import (
     StateDetailLatentAdapter,
     contract_hash,
 )
+from .latent_flow_source import combine_source_fields
 
 FIELD_NAMES = ("state_h", "detail_h", "state_v", "detail_v")
 
@@ -159,6 +160,7 @@ def apply_observation_clamp(
 class FlowSample:
     tau: Tensor
     noise: LatentFieldSet
+    source: LatentFieldSet
     interpolated: LatentFieldSet
     target: LatentFieldSet
 
@@ -171,29 +173,40 @@ class RectifiedFlowObjective(nn.Module):
         self.tau_min, self.tau_max = float(tau_min), float(tau_max)
 
     def sample(
-        self, batch: DiTLatentBatch, *, generator: Optional[torch.Generator] = None
+        self,
+        batch: DiTLatentBatch,
+        *,
+        generator: Optional[torch.Generator] = None,
+        source_center: Optional[LatentFieldSet] = None,
+        source_mode: str = "gaussian",
     ) -> FlowSample:
         tau = torch.rand(
             (batch.batch_size,), device=batch.state_h.device, dtype=batch.state_h.dtype, generator=generator
         )
         tau = self.tau_min + (self.tau_max - self.tau_min) * tau
         noise = sample_isotropic_noise(batch.fields, generator=generator)
+        source = combine_source_fields(
+            source_center,
+            noise,
+            source_mode=source_mode,
+        )
+        source = _mask_fields(source, batch)
         interpolated = LatentFieldSet(
-            rectified_flow_interpolate(batch.state_h, noise.state_h, tau, sample_ids=batch.abid),
-            rectified_flow_interpolate(batch.detail_h, noise.detail_h, tau, sample_ids=batch.abid),
-            rectified_flow_interpolate(batch.state_v, noise.state_v, tau, sample_ids=batch.abid),
-            rectified_flow_interpolate(batch.detail_v, noise.detail_v, tau, sample_ids=batch.abid),
+            rectified_flow_interpolate(batch.state_h, source.state_h, tau, sample_ids=batch.abid),
+            rectified_flow_interpolate(batch.detail_h, source.detail_h, tau, sample_ids=batch.abid),
+            rectified_flow_interpolate(batch.state_v, source.state_v, tau, sample_ids=batch.abid),
+            rectified_flow_interpolate(batch.detail_v, source.detail_v, tau, sample_ids=batch.abid),
         )
         target = LatentFieldSet(
-            rectified_flow_velocity(batch.state_h, noise.state_h),
-            rectified_flow_velocity(batch.detail_h, noise.detail_h),
-            rectified_flow_velocity(batch.state_v, noise.state_v),
-            rectified_flow_velocity(batch.detail_v, noise.detail_v),
+            rectified_flow_velocity(batch.state_h, source.state_h),
+            rectified_flow_velocity(batch.detail_h, source.detail_h),
+            rectified_flow_velocity(batch.state_v, source.state_v),
+            rectified_flow_velocity(batch.detail_v, source.detail_v),
         )
         interpolated = _mask_fields(interpolated, batch)
         target = _zero_observed(_mask_fields(target, batch), batch)
         interpolated = apply_observation_clamp(interpolated, batch.fields, batch)
-        return FlowSample(tau, noise, interpolated, target)
+        return FlowSample(tau, noise, source, interpolated, target)
 
     def loss(self, prediction: LatentFieldSet, target: LatentFieldSet, batch: DiTLatentBatch) -> FlowLoss:
         return four_field_loss(prediction, target, batch)
@@ -225,6 +238,8 @@ def euler_sample(
     seed: int,
     adapter: Optional[StateDetailLatentAdapter] = None,
     statistics: Optional[LatentStatistics] = None,
+    source_center: Optional[LatentFieldSet] = None,
+    source_mode: str = "gaussian",
 ) -> tuple[DiTLatentBatch, dict[str, Any]]:
     if int(steps) not in (8, 16):
         raise ValueError("v1 sampling supports exactly 8 or 16 Euler steps")
@@ -234,7 +249,9 @@ def euler_sample(
     was_training = model.training
     model.eval()
     noise = sample_isotropic_noise(batch.fields, generator=_make_generator(batch.state_h.device, seed))
-    current = apply_observation_clamp(noise, batch.fields, batch)
+    source = combine_source_fields(source_center, noise, source_mode=source_mode)
+    source = _mask_fields(source, batch)
+    current = apply_observation_clamp(source, batch.fields, batch)
     for step in range(steps):
         tau = torch.full(
             (batch.batch_size,), float(step) / steps,
@@ -273,6 +290,8 @@ def euler_sample(
         "observed_clamp_max_abs": observed_clamp_max_abs,
         "stats_hash": "" if statistics is None else statistics.hash,
         "adapter_hash": "" if adapter is None else contract_hash(adapter.contract()),
+        "source_mode": source_mode,
+        "source_center": source_mode == "conditional",
     }
     return result, metadata
 
@@ -285,10 +304,19 @@ def generate_state_detail_latent(
     *,
     steps: int,
     seed: int,
-) -> tuple[Any, dict[str, Any]]:
+    source_center: Optional[LatentFieldSet] = None,
+    source_mode: str = "gaussian",
+    ) -> tuple[Any, dict[str, Any]]:
     normalized = statistics.normalize(batch)
     sampled, metadata = euler_sample(
-        model, normalized, steps=steps, seed=seed, adapter=adapter, statistics=statistics
+        model,
+        normalized,
+        steps=steps,
+        seed=seed,
+        adapter=adapter,
+        statistics=statistics,
+        source_center=source_center,
+        source_mode=source_mode,
     )
     metadata["raw_detail_h"] = None
     metadata["raw_detail_v"] = None

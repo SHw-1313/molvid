@@ -20,6 +20,7 @@ from module.state_detail_latent_adapter import (
     DiTLatentBatch,
     LatentStatistics,
     StateDetailLatentAdapter,
+    LatentFieldSet,
     contract_hash,
 )
 
@@ -58,6 +59,11 @@ class DiTTrainConfig:
     data_hash: str = ""
     codec_hash: str = ""
     stats_hash: str = ""
+    source_mode: str = "gaussian"
+    center_kind: str = "repeat_last_coordinate_encode"
+    source_sigma: float = 1.0
+    normalization_hash: str = ""
+    init_hash: str = ""
     observation_mixture: tuple[int, ...] = (0, 4, 8)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -70,13 +76,23 @@ class DiTTrainConfig:
             raise ValueError("depth, heads, and ffn_multiplier must be positive")
         if self.scalar_width % self.heads or self.vector_width % self.heads:
             raise ValueError("model widths must be divisible by heads")
-        max_steps_limit = 5000 if self.metadata.get("phase") == "t1_pilot" else 100
+        phase = self.metadata.get("phase")
+        if phase == "source_ab_v1":
+            max_steps_limit = 20000
+        elif phase == "t1_pilot":
+            max_steps_limit = 5000
+        else:
+            max_steps_limit = 100
         if self.max_steps < 1 or self.max_steps > max_steps_limit:
             raise ValueError(
                 f"the configured DiT phase allows at most {max_steps_limit} optimizer steps"
             )
         if not self.observation_mixture or any(value not in (0, 4, 8) for value in self.observation_mixture):
             raise ValueError("observation mixture must contain only H=0,4,8")
+        if self.source_mode not in ("gaussian", "conditional"):
+            raise ValueError("source_mode must be gaussian or conditional")
+        if not torch.isfinite(torch.tensor(float(self.source_sigma))) or float(self.source_sigma) != 1.0:
+            raise ValueError("source_sigma is frozen at one")
         if self.output_root.startswith("outputs/state_detail_codec_v2"):
             raise ValueError("DiT outputs must not be written under the active T1 root")
 
@@ -196,6 +212,7 @@ class DiTTrainer:
         batch: DiTLatentBatch,
         *,
         generator: Optional[torch.Generator] = None,
+        source_center: Optional[LatentFieldSet] = None,
     ) -> dict[str, Any]:
         self.model.train()
         if self.codec is not None:
@@ -203,7 +220,12 @@ class DiTTrainer:
         if self.frame_encoder is not None:
             self.frame_encoder.eval()
         batch = self._normalise_batch(batch)
-        flow_sample = self.flow.sample(batch, generator=generator)
+        flow_sample = self.flow.sample(
+            batch,
+            generator=generator,
+            source_center=source_center,
+            source_mode=self.config.source_mode,
+        )
         noisy_batch = batch.with_fields(flow_sample.interpolated)
         with self.autocast_context():
             prediction = self.model(noisy_batch, flow_sample.tau)
@@ -265,6 +287,13 @@ class DiTTrainer:
             "model_contract_hash": contract_hash(self.model.contract()) if hasattr(self.model, "contract") else "",
             "adapter_contract": self.adapter.contract(),
             "adapter_contract_hash": contract_hash(self.adapter.contract()),
+            "source_contract": {
+                "source_mode": self.config.source_mode,
+                "center_kind": self.config.center_kind,
+                "source_sigma": float(self.config.source_sigma),
+                "normalization_hash": self.config.normalization_hash or ("" if self.statistics is None else self.statistics.hash),
+                "init_hash": self.config.init_hash,
+            },
             "statistics_contract": stats_contract,
             "statistics_hash": "" if self.statistics is None else self.statistics.hash,
             "statistics_state": None if self.statistics is None else self.statistics.state_dict(),
@@ -324,6 +353,11 @@ class DiTTrainer:
             raise ValueError("checkpoint model contract mismatch")
         if payload.get("adapter_contract_hash") != contract_hash(self.adapter.contract()):
             raise ValueError("checkpoint adapter contract mismatch")
+        if self.config.metadata.get("phase") == "source_ab_v1":
+            saved_config = payload.get("config", {})
+            for key in ("source_mode", "center_kind", "source_sigma", "normalization_hash", "init_hash"):
+                if saved_config.get(key) != getattr(self.config, key):
+                    raise ValueError(f"checkpoint source contract mismatch at {key}")
         if payload.get("frozen_hashes", {}) != self.frozen_state_hashes():
             raise ValueError("checkpoint frozen codec/frame-encoder hash mismatch")
 
