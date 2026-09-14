@@ -23,6 +23,7 @@ import time
 from typing import Any, Mapping, Sequence
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import torch
@@ -185,6 +186,7 @@ def _cuda_info(device: torch.device) -> dict[str, Any]:
         "amp": "bfloat16",
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG", ""),
+        "cuda_allocator_config": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
     }
 
 
@@ -750,7 +752,7 @@ def _isolation_check(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) 
             "continuous and save/resume next updates differ: "
             + json.dumps(resume_components, sort_keys=True)
         )
-    return {
+    result = {
         "schema": "pvb.dit.capacity_data.isolation_verification.v1",
         "status": "PASS",
         "device": _cuda_info(ctx.device),
@@ -781,6 +783,9 @@ def _isolation_check(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) 
         },
         "test_payload_opened": False,
     }
+    del g, c, d8, continuous, resumed, batch, target_batch, observed, center
+    torch.cuda.empty_cache()
+    return result
 
 
 def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[str, Any]:
@@ -788,13 +793,24 @@ def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> di
     for depth in (4, 8):
         state, init_hash, _hashes, _count = _initialization(ctx, depth)
         states[depth] = (state, init_hash)
-    indices = _first_train_batch(ctx.data.train48, int(ctx.cfg["seed"]["training"]))
+    clip_specs = ctx.data.train48.clip_spec_table()
+    ordered_indices = sorted(
+        range(len(clip_specs)),
+        key=lambda index: (
+            clip_specs[index].effective_tokens,
+            clip_specs[index].sample_id,
+        ),
+    )
+    indices = (int(ordered_indices[len(ordered_indices) // 2]),)
     _batch_cpu, batch, target_batch = _prepare_encoded(ctx, ctx.data.train48, indices)
+    smoke_sample_ids = list(batch.sample_id)
+    smoke_batch_tokens = _batch_tokens(ctx.data.train48, indices)
     rows = []
     blocked = _blocked_experiments(ctx, specs)
     for experiment_id in EXPERIMENT_IDS:
         if experiment_id in blocked:
             continue
+        torch.cuda.empty_cache()
         spec = specs[experiment_id]
         init_state, init_hash = states[spec.depth]
         trainer = _make_trainer(ctx, spec, 1, init_state, init_hash)
@@ -845,13 +861,16 @@ def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> di
             rows.append(row)
             if not finite or not row["observed_clamp_exact"]:
                 raise RuntimeError(f"real clip smoke failed for {experiment_id}, H{history}")
-            del generated, decoded
-        del trainer
+            del observed, center, generated, decoded, metadata
+        del trainer, train_observed, train_center
         torch.cuda.empty_cache()
     return {
         "schema": "pvb.dit.capacity_data.real_smoke.v1",
         "status": "PASS",
         "rows": rows,
+        "sample_ids": smoke_sample_ids,
+        "batch_tokens": smoke_batch_tokens,
+        "selection": "deterministic median effective-token train48 clip",
         "blocked_experiments": {
             experiment_id: {"status": "BLOCKED_DATA", "reason": reason}
             for experiment_id, reason in blocked.items()
