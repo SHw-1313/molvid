@@ -63,7 +63,6 @@ from module.state_detail_latent_adapter import (
 from scripts.run_dit_source_ab import (
     _bond_rmse,
     _coordinate_rms,
-    _decode_fields,
     _merge_center_with_observed,
 )
 from scripts.run_state_detail_dit_pilot import (
@@ -564,6 +563,17 @@ def _observed(ctx: CapacityContext, target_batch: Any, batch: Any, history: int)
     )
 
 
+def _decode_capacity_fields(
+    ctx: CapacityContext,
+    target_batch: Any,
+    fields: LatentFieldSet,
+) -> Tensor:
+    raw = ctx.statistics_device.inverse_fields(fields)
+    latent = ctx.data_adapter.make_generated_latent(target_batch, raw)
+    with torch.autocast(device_type="cuda", enabled=False), torch.no_grad():
+        return ctx.codec.model.decode(latent).x_hat.float()
+
+
 def _center(
     ctx: CapacityContext,
     batch: Any,
@@ -637,7 +647,7 @@ def _source_check(ctx: CapacityContext) -> dict[str, Any]:
             observed = _observed(ctx, target_batch, batch, history)
             center, metadata = _center(ctx, batch, observed, history, LatentFieldCache(mode="disabled"))
             merged = _merge_center_with_observed(ctx, observed, center)
-            decoded = _decode_fields(ctx, observed, merged)
+            decoded = _decode_capacity_fields(ctx, observed, merged)
             template = metadata.get("template_coordinates")
             if template is None:
                 template = batch.x.clone()
