@@ -23,7 +23,8 @@ CPU checks passed:
 - `python -m pytest -q tests/test_dit_capacity_data_v1.py -k 'not cuda'`
 - `python -m pytest -q tests/test_dit_trainer.py tests/test_dit_pilot_runner.py tests/test_dit_source_ab.py -k 'not cuda'`
 
-Latest counts are 5/5 capacity CPU tests and 10/10 directly related trainer/pilot/source tests.
+Latest host-container counts are 7/7 capacity CPU tests and 15/15 combined codec/capacity/source
+tests; 3 gated CUDA tests were deselected in that host run. The earlier neibu CUDA gate passed 2/2.
 
 The preflight was rerun from the correct container cwd `/workspace/molvid-dit-capacity-data-v1`
 and passed; its host-visible artifact is
@@ -46,11 +47,11 @@ CUDA evidence on neibu GPU0 passed:
 - Real 1,525-atom clip H4/H8 sampler/decode smoke passed for G48/C48/C48D8.
 - Source geometry check passed for all 8 validation systems at H4/H8; template raw RMSD is about 0.021--0.024 A and template bond RMSE about 0.012--0.013 A.
 
-The frozen prepare contract uses numerical code commit
-`b68dafa968b72519e976f795b7611673c1154a0f`, contract hash
-`ce9eefe5484e8b3f51e6c5c7edb314bd991634d744b952bc051a145db3f85fbe`, 4,500 successful
+The frozen prepare contract uses training/numerical code commit
+`c070e3c2aeecb6dc33d338e2429bfb426876faac`, contract hash
+`92752fb091ed8486f6ffba13fb6f31582986cba2526695aea174fd71a7814faf`, 4,500 successful
 updates, and 267,988,032 effective atom-frame tokens. Measured p90 end-to-end update times are
-1.589 s (G48), 3.014 s (C48), and 3.120 s (C48D8); C192 reserves a conservative 3.900 s.
+1.574 s (G48), 2.998 s (C48), and 3.095 s (C48D8); C192 reserves a conservative 3.869 s.
 Atomic checkpoints are written every 500 successful updates. Resume restores the checkpointed
 cursor/generator/optimizer/scaler/token count and atomically truncates any trailing JSONL rows,
 while a fresh launch refuses existing formal-run artifacts.
@@ -61,11 +62,28 @@ audit step so required per-system aggregations can be checked first. Logs and pr
 `outputs/dit_capacity_data_v1/20260914_capacity_data_v1/`; inspect the active arm's
 `train_history.jsonl` and do not launch another GPU0 job concurrently.
 
+The first step-2000 monitor attempt failed after training updates had completed because the
+training allocator retained about 81 GiB and cuSOLVER could not create the Kabsch SVD handle. This
+was not an optimization or checkpoint failure. Commit `c070e3c2aeecb6dc33d338e2429bfb426876faac`
+makes the checkpoint durable before monitoring and synchronizes/releases the allocator around
+each sampler/decode metric pass. G48 was restored from checkpoint 1500; the existing JSONL tail was
+atomically truncated, step 2000 was reproduced, all 16 fixed H4/H8 monitor clips and metric rows
+completed, and training continued past step 2000.
+
+Evaluation/reporting commit `60f056b` adds H4/H8 plus L4/L8/future draw-to-clip-to-system
+aggregates, per-system output, block-displacement ratios, and nullable constant RMSF/ACF/Pearson
+handling. It is committed only in the host worktree for now. Do not sync it to neibu until the
+G48→C48→C48D8 queue has exited, because later arms are launched from the shared remote source tree.
+After sync, run its CUDA metric regressions before final evaluation.
+
 The first formal checkpoint, `G48/checkpoints/checkpoint_step000500.pt`, was written successfully
 (134,315,877 bytes). Inspection found step/successful_updates/capacity_successful_updates all 500,
 cursor `{epoch: 0, batch_index: 500}`, 28,951,104 tokens, 166 optimizer state entries, all five AMP
 scaler fields, and generator-state SHA256
 `2813e1e20d7dba2bbe87db48d148130a06b3d06a86e5a380e061d375a674c940`.
+
+G48 also has durable checkpoints at steps 1000, 1500, and 2000. At 21:16 CST on 2026-09-14,
+`train_history.jsonl` had reached step 2011 after the successful monitor.
 
 An initial G48 process was stopped at step 89 before it had a checkpoint, specifically to add the
 periodic checkpoint and resume-history guarantees. That evidence is preserved under
