@@ -22,6 +22,10 @@ from data.clip_dataset import ClipMMapDataset, ClipBatch, collate_clip_records
 SCHEMA = "pvb.dit.capacity_data.v1"
 
 
+class BlockedDataError(RuntimeError):
+    """Raised when a requested frozen data scale is unavailable on this machine."""
+
+
 def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -102,25 +106,37 @@ class CapacityData:
     manifest: Mapping[str, Any]
     materialization: Mapping[str, Any]
     train48: SelectedClipDataset
-    train192: SelectedClipDataset
+    train192: SelectedClipDataset | None
     valid: SelectedClipDataset
     data_hash: str
     source_index_hashes: Mapping[str, str]
+    source_roots: Mapping[str, str]
+    blocked_data: Mapping[str, str]
 
     def train_for_scale(self, scale: str) -> SelectedClipDataset:
         if str(scale) == "base48":
             return self.train48
         if str(scale) == "expanded192":
+            if self.train192 is None:
+                raise BlockedDataError(
+                    self.blocked_data.get("expanded192", "expanded192 is unavailable")
+                )
             return self.train192
         raise ValueError(f"unsupported capacity data scale: {scale!r}")
 
     def close(self) -> None:
-        self.train48.close()
-        self.train192.close()
-        self.valid.close()
+        seen: set[int] = set()
+        for dataset in (self.train48, self.train192, self.valid):
+            if dataset is not None and id(dataset) not in seen:
+                seen.add(id(dataset))
+                dataset.close()
 
 
-def _validate_manifest(manifest_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _validate_manifest(
+    manifest_root: Path,
+    *,
+    allow_missing_expanded: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
     manifest_root = manifest_root.resolve()
     manifest_path = manifest_root / "manifest.json"
     materialization_path = manifest_root / "materialization.json"
@@ -142,22 +158,43 @@ def _validate_manifest(manifest_root: Path) -> tuple[dict[str, Any], dict[str, A
         raise RuntimeError("unsupported capacity materialization schema")
     if materialization.get("test_opened") is not False:
         raise RuntimeError("capacity materialization opened test data")
+    blocked_data: dict[str, str] = {}
     for view in ("train48", "train192", "valid"):
         record = materialization.get("views", {}).get(view, {})
         root = manifest_root / str(record.get("relative_root", ""))
-        if not root.is_dir() or not (root / "data.bin").is_file() or not (root / "index.txt").is_file():
+        if not root.is_dir() or not (root / "index.txt").is_file():
             raise FileNotFoundError(f"capacity materialized view is missing: {root}")
+        if not (root / "data.bin").is_file():
+            if view == "train192" and allow_missing_expanded:
+                blocked_data["expanded192"] = (
+                    f"expanded192 payload is unavailable on this machine: {root / 'data.bin'}"
+                )
+            else:
+                raise FileNotFoundError(f"capacity materialized view payload is missing: {root}")
         if int(record.get("count", -1)) != len(manifest["views"][view]["sample_ids"]):
             raise RuntimeError(f"materialization count differs for {view}")
         if _sha256(root / "index.txt") != str(record.get("index_sha256")):
             raise RuntimeError(f"materialized index hash differs for {view}")
-    return manifest, materialization
+    return manifest, materialization, blocked_data
 
 
-def load_capacity_data(manifest_root: str | Path) -> CapacityData:
+def load_capacity_data(
+    manifest_root: str | Path,
+    *,
+    source_root_overrides: Mapping[str, str | Path] | None = None,
+    allow_missing_expanded: bool = False,
+) -> CapacityData:
     root = Path(manifest_root).resolve()
-    manifest, materialization = _validate_manifest(root)
-    source_roots = manifest["source_views"]
+    manifest, materialization, blocked_data = _validate_manifest(
+        root,
+        allow_missing_expanded=bool(allow_missing_expanded),
+    )
+    source_roots = {label: str(path) for label, path in manifest["source_views"].items()}
+    overrides = dict(source_root_overrides or {})
+    unexpected = sorted(set(overrides).difference(("train", "valid")))
+    if unexpected:
+        raise ValueError(f"unsupported source-root overrides: {unexpected}")
+    source_roots.update({label: str(Path(path).resolve()) for label, path in overrides.items()})
     for label in ("train", "valid"):
         source_root = Path(source_roots[label]).resolve()
         if "test" in {part.lower() for part in source_root.parts}:
@@ -165,8 +202,31 @@ def load_capacity_data(manifest_root: str | Path) -> CapacityData:
         if not source_root.is_dir():
             raise FileNotFoundError(f"source {label} store is missing: {source_root}")
     train48 = SelectedClipDataset(source_roots["train"], manifest["views"]["train48"]["sample_ids"])
-    train192 = SelectedClipDataset(source_roots["train"], manifest["views"]["train192"]["sample_ids"])
     valid = SelectedClipDataset(source_roots["valid"], manifest["views"]["valid"]["sample_ids"])
+    train_positions = {str(row[0]) for row in train48.source._index}
+    missing_expanded = [
+        str(sample_id)
+        for sample_id in manifest["views"]["train192"]["sample_ids"]
+        if str(sample_id) not in train_positions
+    ]
+    train192: SelectedClipDataset | None
+    if blocked_data.get("expanded192") or missing_expanded:
+        if not allow_missing_expanded:
+            train48.close()
+            valid.close()
+            raise RuntimeError(
+                f"expanded192 source is incomplete: {len(missing_expanded)} selected clips are missing"
+            )
+        train192 = None
+        if missing_expanded:
+            blocked_data["expanded192"] = (
+                f"expanded192 source is incomplete on this machine: "
+                f"{len(missing_expanded)} selected clips are missing"
+            )
+    else:
+        train192 = SelectedClipDataset(
+            source_roots["train"], manifest["views"]["train192"]["sample_ids"]
+        )
     source_index_hashes = {
         label: _sha256(Path(source_roots[label]) / "index.txt") for label in ("train", "valid")
     }
@@ -175,7 +235,6 @@ def load_capacity_data(manifest_root: str | Path) -> CapacityData:
         "manifest_content_sha256": manifest["manifest_content_sha256"],
         "materialization_sha256": materialization["materialization_sha256"],
         "source_manifest_sha256": manifest["source_manifest_sha256"],
-        "source_index_hashes": source_index_hashes,
         "views": {
             name: {
                 "sample_ids_sha256": _canonical_hash(manifest["views"][name]["sample_ids"]),
@@ -194,7 +253,15 @@ def load_capacity_data(manifest_root: str | Path) -> CapacityData:
         valid=valid,
         data_hash=_canonical_hash(data_contract),
         source_index_hashes=source_index_hashes,
+        source_roots={label: str(Path(path).resolve()) for label, path in source_roots.items()},
+        blocked_data=blocked_data,
     )
 
 
-__all__ = ["CapacityData", "SCHEMA", "SelectedClipDataset", "load_capacity_data"]
+__all__ = [
+    "BlockedDataError",
+    "CapacityData",
+    "SCHEMA",
+    "SelectedClipDataset",
+    "load_capacity_data",
+]

@@ -31,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.dit_capacity_data import CapacityData, load_capacity_data
+from data.dit_capacity_data import BlockedDataError, CapacityData, load_capacity_data
 from evaluation.dit_diagnostics import (
     aggregate_rows,
     parse_sample_id,
@@ -88,9 +88,17 @@ def _canonical_hash(value: Any) -> str:
 
 
 def _git_commit() -> str:
+    override = os.environ.get("DIT_CODE_COMMIT", "").strip().lower()
+    if override:
+        if len(override) != 40 or any(character not in "0123456789abcdef" for character in override):
+            raise ValueError("DIT_CODE_COMMIT must be a full 40-character hexadecimal commit")
+        return override
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
@@ -268,6 +276,17 @@ def _experiment_specs(cfg: Mapping[str, Any]) -> dict[str, ExperimentSpec]:
     return values
 
 
+def _blocked_experiments(
+    ctx: CapacityContext,
+    specs: Mapping[str, ExperimentSpec],
+) -> dict[str, str]:
+    return {
+        experiment_id: str(ctx.data.blocked_data[spec.data_scale])
+        for experiment_id, spec in specs.items()
+        if spec.data_scale in ctx.data.blocked_data
+    }
+
+
 def _manifest_metadata(cfg: Mapping[str, Any]) -> dict[str, Any]:
     root = _resolve(cfg["data_manifest_root"])
     manifest_path = root / "manifest.json"
@@ -284,11 +303,11 @@ def _manifest_metadata(cfg: Mapping[str, Any]) -> dict[str, Any]:
     if manifest.get("status") != "FROZEN":
         raise RuntimeError("capacity data manifest is not FROZEN")
     candidate = cfg["candidate"]
+    data_overrides = dict(cfg.get("data_source_overrides", {}))
     paths = {
         "codec_result": _resolve(candidate["codec_result"]),
         "codec_checkpoint": _resolve(candidate["codec_checkpoint"]),
         "statistics": _resolve(candidate["statistics"]),
-        "source_manifest": Path(str(manifest["source_manifest"])).resolve(),
     }
     for label, path in paths.items():
         if not path.is_file():
@@ -299,8 +318,50 @@ def _manifest_metadata(cfg: Mapping[str, Any]) -> dict[str, Any]:
     codec_hash = _sha256(paths["codec_checkpoint"])
     if codec_hash != str(candidate["codec_checkpoint_sha256"]):
         raise RuntimeError("frozen codec checkpoint hash differs from capacity config")
-    if _sha256(paths["source_manifest"]) != str(manifest["source_manifest_sha256"]):
-        raise RuntimeError("approved source manifest hash differs from capacity manifest")
+    expected_source_hash = str(manifest["source_manifest_sha256"])
+    source_manifest = _resolve(
+        data_overrides.get("source_manifest", str(manifest["source_manifest"]))
+    )
+    if source_manifest.is_file():
+        if _sha256(source_manifest) != expected_source_hash:
+            raise RuntimeError("approved source manifest hash differs from capacity manifest")
+        source_proof = {
+            "kind": "direct_source_manifest",
+            "path": str(source_manifest),
+            "sha256": expected_source_hash,
+        }
+    else:
+        provenance_value = data_overrides.get("provenance_manifest")
+        if not provenance_value:
+            raise FileNotFoundError(
+                f"source manifest is missing and no frozen provenance manifest was configured: {source_manifest}"
+            )
+        provenance_manifest = _resolve(provenance_value)
+        if not provenance_manifest.is_file():
+            raise FileNotFoundError(f"frozen provenance manifest is missing: {provenance_manifest}")
+        provenance = json.loads(provenance_manifest.read_text(encoding="utf-8"))
+        if provenance.get("status") != "FROZEN":
+            raise RuntimeError("source provenance manifest is not FROZEN")
+        if provenance.get("source_manifest_sha256") != expected_source_hash:
+            raise RuntimeError("source provenance manifest records a different source hash")
+        if provenance.get("test_sampling", {}).get("opened") is not False:
+            raise RuntimeError("source provenance manifest does not certify unopened test sampling")
+        source_proof = {
+            "kind": "frozen_nested_manifest",
+            "path": str(provenance_manifest),
+            "sha256": _sha256(provenance_manifest),
+            "recorded_source_manifest_sha256": expected_source_hash,
+        }
+    source_root_overrides = {}
+    for label in ("train", "valid"):
+        if label not in data_overrides:
+            continue
+        source_root = _resolve(data_overrides[label])
+        if "test" in {part.lower() for part in source_root.parts}:
+            raise RuntimeError(f"source override unexpectedly references test data: {source_root}")
+        if not (source_root / "data.bin").is_file() or not (source_root / "index.txt").is_file():
+            raise FileNotFoundError(f"source override is incomplete: {source_root}")
+        source_root_overrides[label] = str(source_root)
     return {
         "schema": "pvb.dit.capacity_data.preflight.v1",
         "manifest_root": str(root),
@@ -308,8 +369,11 @@ def _manifest_metadata(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "materialization_sha256": _sha256(materialization_path),
         "manifest_content_sha256": manifest["manifest_content_sha256"],
         "data_counts": manifest.get("counts", {}),
-        "source_manifest": str(paths["source_manifest"]),
-        "source_manifest_sha256": manifest["source_manifest_sha256"],
+        "source_manifest": str(source_manifest),
+        "source_manifest_sha256": expected_source_hash,
+        "source_manifest_proof": source_proof,
+        "source_root_overrides": source_root_overrides,
+        "allow_missing_expanded": bool(data_overrides.get("allow_missing_expanded", False)),
         "codec_result": str(paths["codec_result"]),
         "codec_result_sha256": _sha256(paths["codec_result"]),
         "codec_checkpoint": str(paths["codec_checkpoint"]),
@@ -323,7 +387,17 @@ def _manifest_metadata(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 def _load_context(cfg: dict[str, Any], output_dir: Path, device: torch.device) -> CapacityContext:
     _require_cuda(device)
-    data = load_capacity_data(_resolve(cfg["data_manifest_root"]))
+    data_overrides = dict(cfg.get("data_source_overrides", {}))
+    source_root_overrides = {
+        label: _resolve(data_overrides[label])
+        for label in ("train", "valid")
+        if label in data_overrides
+    }
+    data = load_capacity_data(
+        _resolve(cfg["data_manifest_root"]),
+        source_root_overrides=source_root_overrides,
+        allow_missing_expanded=bool(data_overrides.get("allow_missing_expanded", False)),
+    )
     candidate = cfg["candidate"]
     codec = _load_approved_codec(
         candidate=str(candidate["mode"]),
@@ -706,7 +780,10 @@ def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> di
     indices = _first_train_batch(ctx.data.train48, int(ctx.cfg["seed"]["training"]))
     _batch_cpu, batch, target_batch = _prepare_encoded(ctx, ctx.data.train48, indices)
     rows = []
+    blocked = _blocked_experiments(ctx, specs)
     for experiment_id in EXPERIMENT_IDS:
+        if experiment_id in blocked:
+            continue
         spec = specs[experiment_id]
         init_state, init_hash = states[spec.depth]
         trainer = _make_trainer(ctx, spec, 1, init_state, init_hash)
@@ -755,6 +832,10 @@ def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> di
         "schema": "pvb.dit.capacity_data.real_smoke.v1",
         "status": "PASS",
         "rows": rows,
+        "blocked_experiments": {
+            experiment_id: {"status": "BLOCKED_DATA", "reason": reason}
+            for experiment_id, reason in blocked.items()
+        },
         "test_payload_opened": False,
     }
 
@@ -762,11 +843,16 @@ def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> di
 def _verify(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[str, Any]:
     isolation = _isolation_check(ctx, specs)
     smoke = _real_smoke(ctx, specs)
+    blocked = _blocked_experiments(ctx, specs)
     result = {
         "schema": "pvb.dit.capacity_data.verification.v1",
         "status": "PASS",
         "isolation": isolation,
         "real_smoke": smoke,
+        "blocked_experiments": {
+            experiment_id: {"status": "BLOCKED_DATA", "reason": reason}
+            for experiment_id, reason in blocked.items()
+        },
         "test_payload_opened": False,
     }
     _write_json(ctx.output_dir / "verification.json", result)
@@ -914,18 +1000,54 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
         "experiments": {},
         "test_payload_opened": False,
     }
+    blocked = _blocked_experiments(ctx, specs)
     for experiment_id in EXPERIMENT_IDS:
+        if experiment_id in blocked:
+            continue
         spec = specs[experiment_id]
         init_state, init_hash = init_by_depth[spec.depth][:2]
         profile["experiments"][experiment_id] = _profile_one(ctx, spec, init_state, init_hash)
+    if blocked:
+        measured_p90 = [
+            float(value["p90_seconds"])
+            for value in profile["experiments"].values()
+            if value.get("p90_seconds") is not None
+        ]
+        if not measured_p90:
+            raise RuntimeError("no available experiment remained for conservative blocked-data costing")
+        conservative_p90 = max(measured_p90) * 1.25
+        for experiment_id, reason in blocked.items():
+            spec = specs[experiment_id]
+            profile["experiments"][experiment_id] = {
+                "experiment_id": experiment_id,
+                "source_mode": spec.source_mode,
+                "data_scale": spec.data_scale,
+                "depth": spec.depth,
+                "status": "BLOCKED_DATA",
+                "reason": reason,
+                "p90_seconds": conservative_p90,
+                "cost_estimate": "1.25 * maximum measured p90 across available experiments",
+                "test_payload_opened": False,
+            }
+    profile["blocked_experiments"] = {
+        experiment_id: {"status": "BLOCKED_DATA", "reason": reason}
+        for experiment_id, reason in blocked.items()
+    }
     _write_json(ctx.output_dir / "runner_profile.json", profile)
     target_steps = int(ctx.cfg["schedule"]["target_steps"])
     target_tokens, mean_base_tokens = _estimate_tokens(ctx.data.train48, ctx.cfg, target_steps)
     token_estimates = {}
     for experiment_id, spec in specs.items():
-        token_estimates[experiment_id] = _estimate_tokens(
-            ctx.data.train_for_scale(spec.data_scale), ctx.cfg, target_steps
-        )
+        if experiment_id in blocked:
+            token_estimates[experiment_id] = {
+                "status": "BLOCKED_DATA",
+                "reason": blocked[experiment_id],
+                "target_tokens_reserved": target_tokens,
+            }
+        else:
+            token_estimates[experiment_id] = _estimate_tokens(
+                ctx.data.train_for_scale(spec.data_scale), ctx.cfg, target_steps
+            )
     total_gpu_seconds = float(sum(
         profile["experiments"][experiment_id]["p90_seconds"] * target_steps
         for experiment_id in EXPERIMENT_IDS
@@ -994,6 +1116,10 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
         "estimated_training_wall_seconds_at_config_target": total_wall_seconds,
         "budget_frozen_before_results": True,
         "evaluation_reserve_included": True,
+        "blocked_experiments": {
+            experiment_id: {"status": "BLOCKED_DATA", "reason": reason}
+            for experiment_id, reason in blocked.items()
+        },
         "test_payload_opened": False,
     }
     _write_json(ctx.output_dir / "budget.json", budget)
@@ -1024,6 +1150,8 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
         "seeds": dict(ctx.cfg["seed"]),
         "experiments": {
             experiment_id: {
+                "status": "BLOCKED_DATA" if experiment_id in blocked else "READY",
+                "blocked_reason": blocked.get(experiment_id),
                 "source_mode": spec.source_mode,
                 "depth": spec.depth,
                 "data_scale": spec.data_scale,
@@ -1045,7 +1173,13 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
     }
     contract["contract_hash"] = _canonical_hash(contract)
     _write_json(ctx.output_dir / "experiment_contract.json", contract)
-    return {"status": status, "budget": budget, "contract_hash": contract["contract_hash"], "profile": profile}
+    return {
+        "status": status,
+        "budget": budget,
+        "contract_hash": contract["contract_hash"],
+        "profile": profile,
+        "blocked_experiments": profile["blocked_experiments"],
+    }
 
 
 def _load_contract(ctx: CapacityContext) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1583,12 +1717,35 @@ def _train(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec], resume: bo
     plan = _make_validation_plan(ctx.data.valid)
     monitors = _monitor_indices(ctx)
     selected_specs = [specs[key] for key in selected]
+    blocked = _blocked_experiments(ctx, specs)
     results = {}
     for spec in selected_specs:
-        results[spec.experiment_id] = _train_one(ctx, spec, init_payload, budget, plan, monitors, resume)
+        if spec.experiment_id in blocked:
+            results[spec.experiment_id] = {
+                "status": "BLOCKED_DATA",
+                "experiment_id": spec.experiment_id,
+                "data_scale": spec.data_scale,
+                "reason": blocked[spec.experiment_id],
+                "test_payload_opened": False,
+            }
+            _write_json(
+                ctx.output_dir / spec.experiment_id / "train_summary.json",
+                results[spec.experiment_id],
+            )
+        else:
+            results[spec.experiment_id] = _train_one(
+                ctx, spec, init_payload, budget, plan, monitors, resume
+            )
+    statuses = {value["status"] for value in results.values()}
+    if statuses == {"BLOCKED_DATA"}:
+        status = "BLOCKED_DATA"
+    elif statuses.issubset({"PASS", "BLOCKED_DATA"}):
+        status = "PASS_WITH_BLOCKED_DATA" if "BLOCKED_DATA" in statuses else "PASS"
+    else:
+        status = "PARTIAL_TOKEN_BUDGET"
     return {
         "schema": "pvb.dit.capacity_data.training.v1",
-        "status": "PASS" if all(value["status"] == "PASS" for value in results.values()) else "PARTIAL_TOKEN_BUDGET",
+        "status": status,
         "experiments": results,
         "selected": list(selected),
         "contract_hash": contract["contract_hash"],
@@ -1745,7 +1902,20 @@ def _aggregate_generation_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, A
 def _evaluate(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[str, Any]:
     _budget, contract, init_payload = _load_contract(ctx)
     evaluations = {}
+    blocked = _blocked_experiments(ctx, specs)
     for experiment_id in EXPERIMENT_IDS:
+        if experiment_id in blocked:
+            evaluations[experiment_id] = {
+                "schema": "pvb.dit.capacity_data.evaluation.v1",
+                "status": "BLOCKED_DATA",
+                "experiment_id": experiment_id,
+                "source_mode": specs[experiment_id].source_mode,
+                "data_scale": specs[experiment_id].data_scale,
+                "depth": specs[experiment_id].depth,
+                "reason": blocked[experiment_id],
+                "test_payload_opened": False,
+            }
+            continue
         summary_path = ctx.output_dir / experiment_id / "train_summary.json"
         if not summary_path.is_file():
             raise FileNotFoundError(f"training summary missing for {experiment_id}")
@@ -1753,6 +1923,7 @@ def _evaluate(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict
         evaluations[experiment_id] = _evaluate_one(ctx, specs[experiment_id], init_payload, summary)
     comparison = {
         "schema": "pvb.dit.capacity_data.comparison.v1",
+        "status": "PARTIAL_BLOCKED_DATA" if blocked else "PASS",
         "contract_hash": contract["contract_hash"],
         "experiments": evaluations,
         "main_protocol": {
@@ -1786,6 +1957,13 @@ def _write_report(ctx: CapacityContext, comparison: Mapping[str, Any]) -> None:
     ]
     for experiment_id in EXPERIMENT_IDS:
         item = comparison["experiments"][experiment_id]
+        if item.get("status") == "BLOCKED_DATA":
+            for history in HISTORY_SCHEDULE:
+                lines.append(
+                    f"| {experiment_id} | {item['source_mode']} | {item['depth']} | "
+                    f"{item['data_scale']} | {history} | BLOCKED_DATA | n/a | n/a | n/a | n/a |"
+                )
+            continue
         for history in HISTORY_SCHEDULE:
             aggregate = item["final_aggregate"].get(f"H{history}_L16", {}).get("system_equal", {})
             lines.append(
@@ -1859,8 +2037,14 @@ def _summarize(ctx: CapacityContext) -> dict[str, Any]:
         path = ctx.output_dir / experiment_id / "train_summary.json"
         if path.is_file():
             train_summaries[experiment_id] = json.loads(path.read_text(encoding="utf-8"))
-    status = "DIT_CAPACITY_DATA_V1_COMPLETE_FOR_REVIEW"
-    if any(value.get("status") != "PASS" for value in train_summaries.values()):
+    if comparison.get("status") == "PARTIAL_BLOCKED_DATA":
+        status = "DIT_CAPACITY_DATA_V1_PARTIAL_BLOCKED_DATA"
+    else:
+        status = "DIT_CAPACITY_DATA_V1_COMPLETE_FOR_REVIEW"
+    if any(
+        value.get("status") not in ("PASS", "BLOCKED_DATA")
+        for value in train_summaries.values()
+    ):
         status = "DIT_CAPACITY_DATA_V1_PARTIAL_BUDGET"
     result = {
         "schema": "pvb.dit.capacity_data.summary.v1",

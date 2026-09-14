@@ -95,8 +95,43 @@ def test_frozen_capacity_views_are_nested_and_test_free() -> None:
         )
         assert data.manifest["test_sampling"]["opened"] is False
         assert data.materialization["test_opened"] is False
+        assert data.blocked_data == {}
     finally:
         data.close()
+
+
+def test_expanded_scale_raises_explicit_blocked_data() -> None:
+    from pathlib import Path
+
+    from data.dit_capacity_data import BlockedDataError, CapacityData
+
+    base = object()
+    valid = object()
+    data = CapacityData(
+        manifest_root=Path("."),
+        manifest={},
+        materialization={},
+        train48=base,
+        train192=None,
+        valid=valid,
+        data_hash="semantic-data-hash",
+        source_index_hashes={},
+        source_roots={},
+        blocked_data={"expanded192": "expanded source missing"},
+    )
+    assert data.train_for_scale("base48") is base
+    with pytest.raises(BlockedDataError, match="expanded source missing"):
+        data.train_for_scale("expanded192")
+
+
+def test_git_commit_override_requires_full_sha(monkeypatch) -> None:
+    from scripts.run_dit_capacity_data_v1 import _git_commit
+
+    monkeypatch.setenv("DIT_CODE_COMMIT", "a" * 40)
+    assert _git_commit() == "a" * 40
+    monkeypatch.setenv("DIT_CODE_COMMIT", "not-a-full-sha")
+    with pytest.raises(ValueError, match="40-character hexadecimal"):
+        _git_commit()
 
 
 def test_cuda_capacity_parameter_isolation_and_resume(tmp_path) -> None:
