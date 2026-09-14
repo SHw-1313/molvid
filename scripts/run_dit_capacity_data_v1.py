@@ -1560,6 +1560,8 @@ def _clip_prediction_row(
     prediction_root: Path,
     checkpoint_step: int,
 ) -> dict[str, Any]:
+    _sync(ctx.device)
+    torch.cuda.empty_cache()
     _batch_cpu, batch, target_batch = _prepare_encoded(ctx, dataset, (index,))
     observed = _observed(ctx, target_batch, batch, history)
     center = None
@@ -1584,6 +1586,8 @@ def _clip_prediction_row(
         source_mode=spec.source_mode,
     )
     decoded = ctx.codec.model.decode(generated).x_hat.float()
+    _sync(ctx.device)
+    torch.cuda.empty_cache()
     metrics = trajectory_metric_record(decoded, batch.x.float(), batch, history)
     _sanitize_degenerate_correlations(metrics)
     corrected = _corrected_dynamics(decoded, batch.x.float(), batch, history)
@@ -1631,9 +1635,13 @@ def _monitor(
     with torch.no_grad():
         for sample_id, dataset, index in monitor_indices:
             for history in HISTORY_SCHEDULE:
+                _sync(ctx.device)
+                torch.cuda.empty_cache()
                 rows.append(_clip_prediction_row(
                     ctx, trainer, spec, dataset, index, sample_id, history, 16, 0, cache, root, step
                 ))
+    _sync(ctx.device)
+    torch.cuda.empty_cache()
     if was_training:
         trainer.model.train()
     path = ctx.output_dir / spec.experiment_id / "monitor" / f"step{step:06d}.jsonl"
@@ -1788,6 +1796,21 @@ def _train_one(
         train_rows.append(row)
         _append_jsonl(train_history_path, row)
         step = trainer.successful_updates
+        if (
+            step % int(ctx.cfg["schedule"]["checkpoint_interval"]) == 0
+            or step in CHECKPOINT_STEPS
+        ):
+            _save_checkpoint(
+                ctx,
+                trainer,
+                spec,
+                init_hash,
+                schedule_hash,
+                generator,
+                cursor,
+                tokens_seen,
+                label="step",
+            )
         if step % int(ctx.cfg["schedule"]["validation_interval"]) == 0 or step in CHECKPOINT_STEPS:
             validation = _validation_rf(ctx, trainer, plan, spec, step)
             validation["tokens_seen"] = tokens_seen
@@ -1796,11 +1819,6 @@ def _train_one(
         if step % int(ctx.cfg["schedule"]["generation_interval"]) == 0:
             monitor_rows.append(_monitor(ctx, trainer, spec, step, monitor_indices))
             _write_json(monitor_history_path, monitor_rows)
-        if (
-            step % int(ctx.cfg["schedule"]["checkpoint_interval"]) == 0
-            or step in CHECKPOINT_STEPS
-        ):
-            _save_checkpoint(ctx, trainer, spec, init_hash, schedule_hash, generator, cursor, tokens_seen, label="step")
     final_path = _save_checkpoint(ctx, trainer, spec, init_hash, schedule_hash, generator, cursor, tokens_seen, label="final")
     elapsed = time.perf_counter() - started
     summary = {
