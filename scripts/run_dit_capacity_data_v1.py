@@ -22,6 +22,8 @@ import sys
 import time
 from typing import Any, Mapping, Sequence
 
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
 import torch
 import yaml
@@ -181,6 +183,8 @@ def _cuda_info(device: torch.device) -> dict[str, Any]:
         "cuda_runtime": torch.version.cuda,
         "tf32": False,
         "amp": "bfloat16",
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG", ""),
     }
 
 
@@ -819,7 +823,16 @@ def _real_smoke(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> di
                 source_mode=spec.source_mode,
             )
             decoded = ctx.codec.model.decode(generated).x_hat.float()
-            finite = bool(torch.isfinite(decoded).all() and all(torch.isfinite(getattr(generated, name)).all() for name in generated.names()))
+            latent_fields = (
+                generated.state_h,
+                generated.detail_h,
+                generated.state_v,
+                generated.detail_v,
+            )
+            finite = bool(
+                torch.isfinite(decoded).all()
+                and all(value is not None and torch.isfinite(value).all() for value in latent_fields)
+            )
             row = {
                 "experiment_id": experiment_id,
                 "history_frames": history,
@@ -2108,8 +2121,11 @@ def main() -> None:
         print(json.dumps(_safe(result), indent=2, sort_keys=True))
         return
     device = torch.device(args.device)
+    torch.use_deterministic_algorithms(True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     stages = ("preflight", "verify", "source_check", "prepare", "train", "evaluate", "summarize") if args.stage == "all" else (args.stage,)
     selected = EXPERIMENT_IDS if args.experiment == "all" else (args.experiment,)
     result: Any = None
