@@ -61,6 +61,12 @@ audit step so required per-system aggregations can be checked first. Logs and pr
 `outputs/dit_capacity_data_v1/20260914_capacity_data_v1/`; inspect the active arm's
 `train_history.jsonl` and do not launch another GPU0 job concurrently.
 
+The first formal checkpoint, `G48/checkpoints/checkpoint_step000500.pt`, was written successfully
+(134,315,877 bytes). Inspection found step/successful_updates/capacity_successful_updates all 500,
+cursor `{epoch: 0, batch_index: 500}`, 28,951,104 tokens, 166 optimizer state entries, all five AMP
+scaler fields, and generator-state SHA256
+`2813e1e20d7dba2bbe87db48d148130a06b3d06a86e5a380e061d375a674c940`.
+
 An initial G48 process was stopped at step 89 before it had a checkpoint, specifically to add the
 periodic checkpoint and resume-history guarantees. That evidence is preserved under
 `G48_interrupted_precheckpoint_step000089` and is not part of the formal learning curve.

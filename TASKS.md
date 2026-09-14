@@ -16,6 +16,7 @@
 - tmux session `dit-capacity-train` on GPU0 runs independent Python processes in order: G48, C48, C48D8, final evaluation, summarize.
 - Canonical numerical code commit: `b68dafa968b72519e976f795b7611673c1154a0f`.
 - Atomic checkpoints are written every 500 successful updates; resume truncates trailing JSONL rows to the checkpoint step before continuing.
+- The first formal G48 checkpoint at step 500 was written and inspected successfully; training has continued past it.
 - Run root: `/workspace/molvid-dit-capacity-data-v1/outputs/dit_capacity_data_v1/20260914_capacity_data_v1`.
 
 ## Pending
