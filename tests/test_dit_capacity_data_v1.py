@@ -75,6 +75,7 @@ def test_capacity_config_has_four_fixed_experiments() -> None:
     cfg = _load_config(root / "config/dit_capacity_data_v1.yaml")
     specs = _experiment_specs(cfg)
     assert cfg["protocol"]["deterministic_cuda"] is True
+    assert cfg["schedule"]["checkpoint_interval"] == 500
     assert tuple(specs) == EXPERIMENT_IDS
     assert (specs["G48"].source_mode, specs["G48"].depth, specs["G48"].data_scale) == ("gaussian", 4, "base48")
     assert (specs["C48"].source_mode, specs["C48"].depth, specs["C48"].data_scale) == ("conditional", 4, "base48")

@@ -157,6 +157,8 @@ def _load_config(path: Path) -> dict[str, Any]:
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
         raise ValueError("capacity configuration must be a mapping")
+    if int(value.get("schedule", {}).get("checkpoint_interval", 0)) <= 0:
+        raise ValueError("capacity checkpoint_interval must be a positive integer")
     return json.loads(json.dumps(value))
 
 
@@ -1242,6 +1244,7 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
             "histories": list(HISTORY_SCHEDULE),
             "max_atom_frame_tokens": int(ctx.cfg["schedule"]["max_atom_frame_tokens"]),
             "clips_per_trajectory": int(ctx.cfg["schedule"]["clips_per_trajectory"]),
+            "checkpoint_interval": int(ctx.cfg["schedule"]["checkpoint_interval"]),
             "tau": "one uniform per sample, independent generator",
             "eps": "isotropic unit normal per valid coefficient, independent generator",
         },
@@ -1720,7 +1723,10 @@ def _train_one(
         if step % int(ctx.cfg["schedule"]["generation_interval"]) == 0:
             monitor_rows.append(_monitor(ctx, trainer, spec, step, monitor_indices))
             _write_json(ctx.output_dir / spec.experiment_id / "monitor_history.json", monitor_rows)
-        if step in CHECKPOINT_STEPS:
+        if (
+            step % int(ctx.cfg["schedule"]["checkpoint_interval"]) == 0
+            or step in CHECKPOINT_STEPS
+        ):
             _save_checkpoint(ctx, trainer, spec, init_hash, schedule_hash, generator, cursor, tokens_seen, label="step")
     final_path = _save_checkpoint(ctx, trainer, spec, init_hash, schedule_hash, generator, cursor, tokens_seen, label="final")
     elapsed = time.perf_counter() - started
