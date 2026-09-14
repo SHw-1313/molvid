@@ -931,8 +931,11 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
         for experiment_id in EXPERIMENT_IDS
     ))
     total_budget_seconds = float(ctx.cfg["budget"]["gpu_hours_total"]) * 3600.0
+    total_wall_seconds = total_gpu_seconds
+    total_wall_budget_seconds = float(ctx.cfg["budget"]["wall_hours_total"]) * 3600.0
     reserve = float(ctx.cfg["budget"]["reserve_fraction"])
     usable = total_budget_seconds * (1.0 - reserve)
+    usable_wall = total_wall_budget_seconds * (1.0 - reserve)
     selected_steps = 0
     selected_tokens = 0
     candidate_records = []
@@ -942,8 +945,18 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
             profile["experiments"][experiment_id]["p90_seconds"] * candidate_steps
             for experiment_id in EXPERIMENT_IDS
         ))
-        fits = candidate_cost <= usable
-        candidate_records.append({"steps": candidate_steps, "target_tokens": candidate_tokens, "estimated_training_gpu_seconds": candidate_cost, "fits_reserved_budget": fits})
+        fits_gpu = candidate_cost <= usable
+        fits_wall = candidate_cost <= usable_wall
+        fits = fits_gpu and fits_wall
+        candidate_records.append({
+            "steps": candidate_steps,
+            "target_tokens": candidate_tokens,
+            "estimated_training_gpu_seconds": candidate_cost,
+            "estimated_training_wall_seconds": candidate_cost,
+            "fits_reserved_gpu_budget": fits_gpu,
+            "fits_reserved_wall_budget": fits_wall,
+            "fits_reserved_budget": fits,
+        })
         if fits and selected_steps == 0:
             selected_steps = candidate_steps
             selected_tokens = candidate_tokens
@@ -967,6 +980,9 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
         "reserved_fraction": reserve,
         "reserved_gpu_seconds": total_budget_seconds * reserve,
         "usable_training_gpu_seconds": usable,
+        "wall_hours_total": float(ctx.cfg["budget"]["wall_hours_total"]),
+        "reserved_wall_seconds": total_wall_budget_seconds * reserve,
+        "usable_training_wall_seconds": usable_wall,
         "selected_base_steps": selected_steps,
         "selected_target_tokens": selected_tokens,
         "per_experiment_target_step_cap": per_experiment_target_steps,
@@ -975,6 +991,7 @@ def _prepare(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict[
         "token_estimates_at_cap": token_estimates,
         "mean_base_batch_tokens": mean_base_tokens,
         "estimated_training_gpu_seconds_at_config_target": total_gpu_seconds,
+        "estimated_training_wall_seconds_at_config_target": total_wall_seconds,
         "budget_frozen_before_results": True,
         "evaluation_reserve_included": True,
         "test_payload_opened": False,
