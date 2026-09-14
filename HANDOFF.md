@@ -70,9 +70,10 @@ each sampler/decode metric pass. G48 was restored from checkpoint 1500; the exis
 atomically truncated, step 2000 was reproduced, all 16 fixed H4/H8 monitor clips and metric rows
 completed, and training continued past step 2000.
 
-Evaluation/reporting commit `60f056b` adds H4/H8 plus L4/L8/future draw-to-clip-to-system
+Evaluation/reporting code through commit `98b5af3` adds H4/H8 plus L4/L8/future draw-to-clip-to-system
 aggregates, per-system output, block-displacement ratios, and nullable constant RMSF/ACF/Pearson
-handling. It is committed only in the host worktree for now. Do not sync it to neibu until the
+handling. Missing torsion indices remain null, and legacy occupancy/empty diversity are excluded
+from formal aggregates. It is committed only in the host worktree for now. Do not sync it to neibu until the
 G48→C48→C48D8 queue has exited, because later arms are launched from the shared remote source tree.
 After sync, run its CUDA metric regressions before final evaluation.
 
