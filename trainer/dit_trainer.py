@@ -77,7 +77,7 @@ class DiTTrainConfig:
         if self.scalar_width % self.heads or self.vector_width % self.heads:
             raise ValueError("model widths must be divisible by heads")
         phase = self.metadata.get("phase")
-        if phase == "source_ab_v1":
+        if phase in ("source_ab_v1", "dit_capacity_data_v1"):
             max_steps_limit = 20000
         elif phase == "t1_pilot":
             max_steps_limit = 5000
@@ -167,6 +167,7 @@ class DiTTrainer:
         else:
             self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
         self.step = 0
+        self.successful_updates = 0
         self.last_activation_dtypes: dict[str, str] = {}
         self._rng_seed = int(config.seed)
         _set_seed(self._rng_seed)
@@ -248,14 +249,24 @@ class DiTTrainer:
         )
         if not torch.isfinite(torch.as_tensor(grad_norm)):
             raise FloatingPointError("non-finite DiT gradient norm")
+        scale_before = float(self.scaler.get_scale()) if self.scaler.is_enabled() else None
         if self.scaler.is_enabled():
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            if scale_before is not None and float(self.scaler.get_scale()) < scale_before:
+                raise FloatingPointError("AMP scaler skipped a non-finite optimizer update")
         else:
             self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
+        if any(
+            not torch.isfinite(parameter.detach()).all()
+            for parameter in self.model.parameters()
+            if parameter.requires_grad
+        ):
+            raise FloatingPointError("optimizer produced non-finite trainable parameters")
         self.step += 1
+        self.successful_updates += 1
         valid = batch.field_masks()
         observation = batch.observed_mask
         return {
@@ -279,6 +290,7 @@ class DiTTrainer:
         return {
             "schema": DIT_CHECKPOINT_SCHEMA,
             "step": int(self.step),
+            "successful_optimizer_updates": int(self.successful_updates),
             "config": self.config.contract(),
             "ratio": self.config.ratio,
             "mode": self.config.mode,
@@ -353,7 +365,7 @@ class DiTTrainer:
             raise ValueError("checkpoint model contract mismatch")
         if payload.get("adapter_contract_hash") != contract_hash(self.adapter.contract()):
             raise ValueError("checkpoint adapter contract mismatch")
-        if self.config.metadata.get("phase") == "source_ab_v1":
+        if self.config.metadata.get("phase") in ("source_ab_v1", "dit_capacity_data_v1"):
             saved_config = payload.get("config", {})
             for key in ("source_mode", "center_kind", "source_sigma", "normalization_hash", "init_hash"):
                 if saved_config.get(key) != getattr(self.config, key):
@@ -376,6 +388,9 @@ class DiTTrainer:
         if payload.get("scaler_state"):
             self.scaler.load_state_dict(payload["scaler_state"])
         self.step = int(payload["step"])
+        self.successful_updates = int(payload.get("successful_optimizer_updates", self.step))
+        if self.successful_updates != self.step:
+            raise ValueError("checkpoint successful update count disagrees with optimizer step")
         rng = payload.get("rng_state", {})
         if rng:
             random.setstate(rng["python"])

@@ -125,3 +125,40 @@ The operator has authorized the next stage on the existing `perf/dit-factorized-
 - Implement before testing; targeted CUDA checks precede real smoke and directly affected regression. Do not start with full-repository pytest.
 - New artifacts belong under `outputs/dit_source_ab_v1/`. Do not overwrite old outputs or open test payloads. Do not push, create PRs, merge/rebase or start extra coding agents.
 - Follow the new budget and final-status rules. Finish at `SOURCE_AB_V1_COMPLETE_FOR_REVIEW`, `SOURCE_AB_V1_PARTIAL_BUDGET` or `SOURCE_AB_V1_BLOCKED` with evidence.
+
+## Active transition — Session B capacity/data comparison, 2026-09-14
+
+This worktree is the independently authorized Session B lane for the capacity/data comparison. It
+is based on fixed commit `5c2754fcce44ed77dad77db09db709408fee7634`, on branch
+`exp/dit-capacity-data-v1`, at `/data4/users/sihao/workspace/molvid-dit-capacity-data-v1`.
+Session A's original worktree and all of its uncommitted changes, evaluations, and outputs are
+read-only. Do not modify, reset, merge, rebase, or copy its active source. Do not wait for A.
+
+- First repair parameter isolation in the legacy source runner's `both` path and the new capacity
+  runner: every experiment owns its model, trainable adapter, optimizer, scaler, RNG, and storage;
+  frozen codec/statistics may be shared. Prove this with targeted CUDA checks, including a one-step
+  cross-mutation check and deterministic save/resume continuation, before scientific training.
+- The four comparison points are G48 (Gaussian depth 4), C48 (Conditional depth 4), C192
+  (Conditional depth 4 with the largest valid nested data scale), and C48D8 (Conditional depth 8).
+  Keep TorchMDNet, codec/decoder, statistics, 16-frame schema, H4/H8, 100 ps spacing, scalar256,
+  vector128, heads8, FFN×4, dropout0, factorized_v2, RF four-field equal MSE, sigma1, and the
+  stated AdamW/clip policy frozen. No geometry loss, refiner, VAE, static mixing, or new encoder.
+- Use `scripts/run_dit_capacity_data_v1.py` (or an equivalent independent entry) and keep all
+  new artifacts under `outputs/dit_capacity_data_v1/<run_id>/`. Training, data manifests,
+  materialization, relevant trainer changes, targeted tests, curves, report, and HANDOFF belong to
+  this worktree. Do not overwrite `outputs/dit_source_ab_v1/` or old `/tmp` artifacts.
+- Build only a nested train expansion from the approved local dynamic pool; preserve the original
+  eight validation systems and eight sealed test systems and never read test coordinates. Keep
+  system/sequence/chain and existing homology-disjoint rules; if only system-disjoint evidence is
+  available, say so. Block only the corresponding expanded-data point when the required scale is
+  unavailable, and continue eligible points.
+- Freeze the total 32 GPU-hour/36-hour wall budget before looking at results, reserve at least 25%
+  for validation/recovery/evaluation, measure end-to-end representative batches, and enforce a
+  phase-specific budget/max-step contract without weakening old phase limits. Use at most three
+  idle GPUs while Session A occupies one, no DDP, and run all Python/model/scientific/test commands
+  through `enter-container` with `conda activate torch-ito`; numerical paths must use CUDA.
+- B's minimum evaluation is real per-clip generation with correct draw/clip/system aggregation for
+  the fixed validation clips and compact prediction-coordinate retention. Do not fabricate real
+  generation metrics from step-only JSON. Record source/config/data/statistics/code hashes,
+  checkpoint schema, actual successful updates, token exposure, and unresolved data/implementation/
+  optimization/generation blockers.

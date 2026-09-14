@@ -162,6 +162,16 @@ def _new_model(cfg: Mapping[str, Any], adapter: StateDetailLatentAdapter) -> Mol
     )
 
 
+def _new_adapter(cfg: Mapping[str, Any], device: torch.device) -> StateDetailLatentAdapter:
+    model_cfg = cfg["model"]
+    return StateDetailLatentAdapter(
+        codec_width=int(model_cfg["codec_width"]),
+        scalar_width=int(model_cfg["scalar_width"]),
+        vector_width=int(model_cfg["vector_width"]),
+        ratio=int(cfg["candidate"]["ratio"]),
+    ).to(device)
+
+
 @dataclass
 class ExperimentContext:
     cfg: dict[str, Any]
@@ -273,8 +283,9 @@ def _load_context(cfg: dict[str, Any], output_dir: Path, device: torch.device) -
     )
 
 
-def _shared_initialization(cfg: Mapping[str, Any], adapter: StateDetailLatentAdapter, device: torch.device) -> tuple[dict[str, Tensor], str]:
+def _shared_initialization(cfg: Mapping[str, Any], device: torch.device) -> tuple[dict[str, Tensor], str]:
     torch.manual_seed(int(cfg["seed"]["init"]))
+    adapter = _new_adapter(cfg, device)
     model = _new_model(cfg, adapter).to(device)
     state = {name: value.detach().to(device="cpu").clone() for name, value in model.state_dict().items()}
     init_hash = module_state_hash(model)
@@ -293,7 +304,9 @@ def _make_trainer(
 ) -> DiTTrainer:
     cfg = context.cfg
     candidate = cfg["candidate"]
-    model = _new_model(cfg, context.adapter).to(context.device)
+    torch.manual_seed(int(cfg["seed"]["init"]))
+    adapter = _new_adapter(cfg, context.device)
+    model = _new_model(cfg, adapter).to(context.device)
     model.load_state_dict(init_state, strict=True)
     model_hash = module_state_hash(model)
     if model_hash != init_hash:
@@ -338,7 +351,7 @@ def _make_trainer(
     )
     return DiTTrainer(
         model,
-        context.adapter,
+        adapter,
         config=train_cfg,
         statistics=context.statistics.to(device=context.device),
         codec=context.codec.model,
@@ -689,7 +702,7 @@ def _profile_prepare(ctx: ExperimentContext, source_decision: Mapping[str, Any])
     center_kind = source_decision.get("selected_center_kind")
     if not center_kind:
         raise RuntimeError("cannot prepare a budget without a passing source decision")
-    init_state, init_hash = _shared_initialization(ctx.cfg, ctx.adapter, ctx.device)
+    init_state, init_hash = _shared_initialization(ctx.cfg, ctx.device)
     _write_json(
         ctx.output_dir / "shared_initialization.json",
         {"schema": "pvb.dit.state_detail.source_ab.shared_init.v1", "init_hash": init_hash, "parameter_count": sum(value.numel() for value in init_state.values())},
