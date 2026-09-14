@@ -347,6 +347,76 @@ def test_evaluation_rows_resume_from_atomic_contract_shards(tmp_path) -> None:
         )
 
 
+def test_report_retains_horizons_motion_cost_and_blocked_data(tmp_path, monkeypatch) -> None:
+    from scripts.run_dit_capacity_data_v1 import _write_report
+
+    def aggregate(value: float) -> dict:
+        metrics = {
+            "aligned_rmsd": value,
+            "drmsd": value + 0.1,
+            "bond_rmse": value + 0.2,
+            "contact_f1": 1.0 - value / 10.0,
+            "rmsf_prediction": value,
+            "rmsf_target": 1.0,
+            "rmsf_ratio": value,
+            "rmsf_atom_correlation": 0.5,
+            "prediction_within_block_rms": value,
+            "target_within_block_rms": 1.0,
+            "within_block_displacement_ratio": value,
+            "prediction_between_block_centroid_rms": value,
+            "target_between_block_centroid_rms": 1.0,
+            "between_block_displacement_ratio": value,
+        }
+        return {
+            f"H{history}_L16": {
+                "regions": {
+                    region: {"system_equal": metrics}
+                    for region in ("L4", "L8", "future")
+                }
+            }
+            for history in (4, 8)
+        }
+
+    experiments = {}
+    for experiment_id, value in (("G48", 3.0), ("C48", 2.0), ("C48D8", 1.5)):
+        experiments[experiment_id] = {
+            "status": "PASS",
+            "source_mode": "gaussian" if experiment_id == "G48" else "conditional",
+            "data_scale": "base48",
+            "depth": 8 if experiment_id == "C48D8" else 4,
+            "final_aggregate": aggregate(value),
+            "train_subset_aggregate": aggregate(value + 0.5),
+            "generated_row_gpu_hours": 0.25,
+        }
+        run_dir = tmp_path / experiment_id
+        run_dir.mkdir()
+        (run_dir / "train_summary.json").write_text(
+            '{"actual_optimizer_updates": 4500, "tokens_seen": 100, '
+            '"estimated_gpu_hours": 1.5}\n',
+            encoding="utf-8",
+        )
+    experiments["C192"] = {
+        "status": "BLOCKED_DATA",
+        "source_mode": "conditional",
+        "data_scale": "expanded192",
+        "depth": 4,
+        "reason": "expanded payload missing",
+    }
+    (tmp_path / "source_decision.json").write_text(
+        '{"rows": [{"template_bond_rmse": 0.01}]}\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("DIT_CODE_COMMIT", "a" * 40)
+    _write_report(SimpleNamespace(output_dir=tmp_path), {"experiments": experiments})
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+
+    assert "| G48 | gaussian | 4 | base48 | 4 | L4 |" in report
+    assert "## Future motion decomposition" in report
+    assert "Conditional source gain retained (C48 vs G48): YES" in report
+    assert "More training systems (C192 vs C48): BLOCKED_DATA" in report
+    assert "training GPU-hours" in report
+    assert "explicit geometry supervision or local atom interactions" in report
+
+
 def test_cuda_legacy_both_path_builds_independent_trainable_models(tmp_path) -> None:
     from scripts.run_dit_source_ab import ExperimentContext, _make_trainer, _shared_initialization
 

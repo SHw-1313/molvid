@@ -1930,11 +1930,15 @@ def _materialize_evaluation_row(
     if exists:
         row = json.loads(path.read_text(encoding="utf-8"))
     else:
+        started = time.perf_counter()
         row = dict(reuse_row) if reuse_row is not None else dict(build_row())
         row["evaluation_split"] = split
         row["evaluation_contract_hash"] = contract_hash
         if reuse_row is not None:
             row["reused_from_split"] = str(reuse_row["evaluation_split"])
+            row["evaluation_row_wall_seconds"] = 0.0
+        else:
+            row["evaluation_row_wall_seconds"] = time.perf_counter() - started
     if row.get("evaluation_split") != split:
         raise RuntimeError(f"evaluation row split mismatch at {path}")
     if row.get("evaluation_contract_hash") != contract_hash:
@@ -2155,6 +2159,12 @@ def _evaluate_one(
         "reused_rows": sum(
             row.get("reused_from_split") is not None for row in all_rows
         ),
+        "generated_row_gpu_hours": sum(
+            float(row.get("evaluation_row_wall_seconds", 0.0))
+            for row in all_rows
+            if row.get("reused_from_split") is None
+        )
+        / 3600.0,
         "final_aggregate": _aggregate_generation_rows(rows),
         "subset_aggregate": _aggregate_generation_rows(subset_rows),
         "train_subset_aggregate": _aggregate_generation_rows(train_subset_rows),
@@ -2384,6 +2394,75 @@ def _evaluate(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict
     return comparison
 
 
+def _report_number(value: Any) -> str:
+    number = _finite_number(value)
+    return "n/a" if number is None else f"{number:.6g}"
+
+
+def _report_history_mean(
+    item: Mapping[str, Any],
+    aggregate_name: str,
+    key: str,
+    *,
+    region: str = "future",
+) -> float | None:
+    values = []
+    for history in HISTORY_SCHEDULE:
+        number = _finite_number(
+            item.get(aggregate_name, {})
+            .get(f"H{history}_L16", {})
+            .get("regions", {})
+            .get(region, {})
+            .get("system_equal", {})
+            .get(key)
+        )
+        if number is not None:
+            values.append(number)
+    return sum(values) / len(values) if values else None
+
+
+def _report_comparison(
+    label: str,
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> str:
+    if baseline.get("status") == "BLOCKED_DATA" or candidate.get("status") == "BLOCKED_DATA":
+        reason = candidate.get("reason") or baseline.get("reason") or "data unavailable"
+        return f"- {label}: BLOCKED_DATA — {reason}"
+    baseline_rmsd = _report_history_mean(baseline, "final_aggregate", "aligned_rmsd")
+    candidate_rmsd = _report_history_mean(candidate, "final_aggregate", "aligned_rmsd")
+    baseline_bond = _report_history_mean(baseline, "final_aggregate", "bond_rmse")
+    candidate_bond = _report_history_mean(candidate, "final_aggregate", "bond_rmse")
+    baseline_contact = _report_history_mean(baseline, "final_aggregate", "contact_f1")
+    candidate_contact = _report_history_mean(candidate, "final_aggregate", "contact_f1")
+    metrics = (
+        ("aligned RMSD", baseline_rmsd, candidate_rmsd, -1.0),
+        ("bond RMSE", baseline_bond, candidate_bond, -1.0),
+        ("contact F1", baseline_contact, candidate_contact, 1.0),
+    )
+    if any(before is None or after is None for _name, before, after, _direction in metrics):
+        return f"- {label}: unavailable because one or more primary metrics are missing."
+    deltas = {
+        name: float(after) - float(before)
+        for name, before, after, _direction in metrics
+    }
+    improvements = [
+        direction * deltas[name] > 0.0
+        for name, _before, _after, direction in metrics
+    ]
+    if all(improvements):
+        status = "YES — all three primary geometry/contact metrics improve"
+    elif any(improvements):
+        status = "MIXED — the joint three-metric improvement criterion is not met"
+    else:
+        status = "NO — none of the three primary geometry/contact metrics improves"
+    return (
+        f"- {label}: {status}; delta(candidate-baseline) aligned RMSD="
+        f"{deltas['aligned RMSD']:.6g}, bond RMSE={deltas['bond RMSE']:.6g}, "
+        f"contact F1={deltas['contact F1']:.6g}."
+    )
+
+
 def _write_report(ctx: CapacityContext, comparison: Mapping[str, Any]) -> None:
     lines = [
         "# DiT capacity/data comparison — Session B",
@@ -2392,25 +2471,160 @@ def _write_report(ctx: CapacityContext, comparison: Mapping[str, Any]) -> None:
         "",
         "## Main final comparison",
         "",
-        "| ID | source | depth | data | H | aligned RMSD | dRMSD | bond RMSE | contact F1 | RMSF ratio |",
-        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|",
+        "| ID | source | depth | data | H | region | aligned RMSD | dRMSD | bond RMSE | contact F1 | RMSF ratio |",
+        "|---|---|---:|---|---:|---|---:|---:|---:|---:|---:|",
     ]
     for experiment_id in EXPERIMENT_IDS:
         item = comparison["experiments"][experiment_id]
         if item.get("status") == "BLOCKED_DATA":
             for history in HISTORY_SCHEDULE:
-                lines.append(
-                    f"| {experiment_id} | {item['source_mode']} | {item['depth']} | "
-                    f"{item['data_scale']} | {history} | BLOCKED_DATA | n/a | n/a | n/a | n/a |"
-                )
+                for region in ("L4", "L8", "future"):
+                    lines.append(
+                        f"| {experiment_id} | {item['source_mode']} | {item['depth']} | "
+                        f"{item['data_scale']} | {history} | {region} | BLOCKED_DATA | "
+                        "n/a | n/a | n/a | n/a |"
+                    )
             continue
         for history in HISTORY_SCHEDULE:
-            aggregate = item["final_aggregate"].get(f"H{history}_L16", {}).get("system_equal", {})
+            group = item["final_aggregate"].get(f"H{history}_L16", {})
+            for region in ("L4", "L8", "future"):
+                aggregate = (
+                    group.get("regions", {}).get(region, {}).get("system_equal", {})
+                )
+                lines.append(
+                    f"| {experiment_id} | {item['source_mode']} | {item['depth']} | "
+                    f"{item['data_scale']} | {history} | {region} | "
+                    f"{_report_number(aggregate.get('aligned_rmsd'))} | "
+                    f"{_report_number(aggregate.get('drmsd'))} | "
+                    f"{_report_number(aggregate.get('bond_rmse'))} | "
+                    f"{_report_number(aggregate.get('contact_f1'))} | "
+                    f"{_report_number(aggregate.get('rmsf_ratio'))} |"
+                )
+    lines.extend([
+        "",
+        "## Future motion decomposition",
+        "",
+        "| ID | H | RMSF prediction | RMSF MD | ratio | atom correlation | within-block pred/MD/ratio | between-block pred/MD/ratio |",
+        "|---|---:|---:|---:|---:|---:|---|---|",
+    ])
+    for experiment_id in EXPERIMENT_IDS:
+        item = comparison["experiments"][experiment_id]
+        for history in HISTORY_SCHEDULE:
+            if item.get("status") == "BLOCKED_DATA":
+                lines.append(
+                    f"| {experiment_id} | {history} | BLOCKED_DATA | n/a | n/a | n/a | n/a | n/a |"
+                )
+                continue
+            values = (
+                item["final_aggregate"]
+                .get(f"H{history}_L16", {})
+                .get("regions", {})
+                .get("future", {})
+                .get("system_equal", {})
+            )
+            within = "/".join(
+                _report_number(values.get(key))
+                for key in (
+                    "prediction_within_block_rms",
+                    "target_within_block_rms",
+                    "within_block_displacement_ratio",
+                )
+            )
+            between = "/".join(
+                _report_number(values.get(key))
+                for key in (
+                    "prediction_between_block_centroid_rms",
+                    "target_between_block_centroid_rms",
+                    "between_block_displacement_ratio",
+                )
+            )
             lines.append(
-                f"| {experiment_id} | {item['source_mode']} | {item['depth']} | {item['data_scale']} | {history} | "
-                f"{aggregate.get('aligned_rmsd', 'n/a')} | {aggregate.get('drmsd', 'n/a')} | "
-                f"{aggregate.get('bond_rmse', 'n/a')} | {aggregate.get('contact_f1', 'n/a')} | "
-                f"{aggregate.get('rmsf_ratio', 'n/a')} |"
+                f"| {experiment_id} | {history} | "
+                f"{_report_number(values.get('rmsf_prediction'))} | "
+                f"{_report_number(values.get('rmsf_target'))} | "
+                f"{_report_number(values.get('rmsf_ratio'))} | "
+                f"{_report_number(values.get('rmsf_atom_correlation'))} | "
+                f"{within} | {between} |"
+            )
+    lines.extend([
+        "",
+        "## Comparison decisions",
+        "",
+        "The source-gain criterion requires lower aligned RMSD, lower bond RMSE, and higher contact F1 after averaging the system-equal H4/H8 future metrics; no RF-loss cross-source ranking or hidden composite is used.",
+        "",
+        _report_comparison(
+            "Conditional source gain retained (C48 vs G48)",
+            comparison["experiments"]["G48"],
+            comparison["experiments"]["C48"],
+        ),
+        _report_comparison(
+            "More training systems (C192 vs C48)",
+            comparison["experiments"]["C48"],
+            comparison["experiments"]["C192"],
+        ),
+        _report_comparison(
+            "More DiT layers (C48D8 vs C48)",
+            comparison["experiments"]["C48"],
+            comparison["experiments"]["C48D8"],
+        ),
+        "",
+        "Data-versus-depth cannot be ranked when either C192 or C48D8 is incomplete; completed deltas above remain valid without filling the missing arm.",
+        "",
+        "## Cost and training-system geometry",
+        "",
+        "| ID | status | updates | tokens | training GPU-hours | evaluation GPU-hours | train-subset future bond RMSE |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ])
+    source_path = ctx.output_dir / "source_decision.json"
+    source_rows = (
+        json.loads(source_path.read_text(encoding="utf-8")).get("rows", [])
+        if source_path.is_file()
+        else []
+    )
+    source_bonds = [
+        float(row["template_bond_rmse"])
+        for row in source_rows
+        if _finite_number(row.get("template_bond_rmse")) is not None
+    ]
+    source_bond_reference = (
+        sum(source_bonds) / len(source_bonds) if source_bonds else None
+    )
+    completed_validation_bonds = []
+    for experiment_id in EXPERIMENT_IDS:
+        item = comparison["experiments"][experiment_id]
+        summary_path = ctx.output_dir / experiment_id / "train_summary.json"
+        train_summary = (
+            json.loads(summary_path.read_text(encoding="utf-8"))
+            if summary_path.is_file()
+            else {}
+        )
+        train_bond = _report_history_mean(
+            item, "train_subset_aggregate", "bond_rmse"
+        )
+        validation_bond = _report_history_mean(
+            item, "final_aggregate", "bond_rmse"
+        )
+        if validation_bond is not None:
+            completed_validation_bonds.append(validation_bond)
+        lines.append(
+            f"| {experiment_id} | {item.get('status', 'PASS')} | "
+            f"{train_summary.get('actual_optimizer_updates', 'n/a')} | "
+            f"{train_summary.get('tokens_seen', 'n/a')} | "
+            f"{_report_number(train_summary.get('estimated_gpu_hours'))} | "
+            f"{_report_number(item.get('generated_row_gpu_hours'))} | "
+            f"{_report_number(train_bond)} |"
+        )
+    if source_bond_reference is not None:
+        lines.extend([
+            "",
+            f"Frozen conditional-source template bond RMSE reference: {_report_number(source_bond_reference)} A.",
+        ])
+        if completed_validation_bonds and all(
+            value > 10.0 * source_bond_reference
+            for value in completed_validation_bonds
+        ):
+            lines.append(
+                "All completed validation arms exceed 10x that frozen-source bond reference. Together with path RMSD/dRMSD and within/between-block motion errors above, this supports testing explicit geometry supervision or local atom interactions next; neither was added in this phase."
             )
     lines.extend([
         "",
@@ -2420,7 +2634,8 @@ def _write_report(ctx: CapacityContext, comparison: Mapping[str, Any]) -> None:
         "- C48 vs C192 isolates nested training-system diversity at depth 4; the data manifest proves system disjointness, but no sequence/homology audit was available, so no family-generalization claim is made.",
         "- C48 vs C48D8 isolates DiT depth at the original 48-system data scale.",
         "- RF validation is reported within source/configuration and is not used to rank Gaussian against Conditional.",
-        "- ACF/Pearson-like values are null when the future velocity variance is numerically degenerate; true occupancy MAE is null when the all-pair implementation is not applicable.",
+        "- ACF/Pearson-like values are null for constant or insufficient signals; missing torsion indices remain null.",
+        "- Legacy per-frame occupancy and unimplemented diversity are excluded from formal aggregates. The separately named true-future occupancy MAE is null when its all-pair implementation is not applicable.",
         "",
         f"Code commit: `{_git_commit()}`",
         f"Output root: `{ctx.output_dir}`",
