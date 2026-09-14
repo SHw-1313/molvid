@@ -20,7 +20,7 @@ import random
 import subprocess
 import sys
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -1900,68 +1900,269 @@ def _train(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec], resume: bo
     }
 
 
-def _evaluate_one(ctx: CapacityContext, spec: ExperimentSpec, init_payload: Mapping[str, Any], train_summary: Mapping[str, Any]) -> dict[str, Any]:
+def _evaluation_row_path(
+    run_dir: Path,
+    split: str,
+    sample_id: str,
+    history: int,
+    steps: int,
+    draw_id: int,
+) -> Path:
+    safe_sample_id = sample_id.replace("/", "_")
+    return (
+        run_dir
+        / "evaluation_rows"
+        / split
+        / f"{safe_sample_id}__H{history}__L{steps}__draw{draw_id}.json"
+    )
+
+
+def _materialize_evaluation_row(
+    path: Path,
+    *,
+    split: str,
+    contract_hash: str,
+    expected: Mapping[str, Any],
+    build_row: Callable[[], Mapping[str, Any]],
+    reuse_row: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    exists = path.is_file()
+    if exists:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        row = dict(reuse_row) if reuse_row is not None else dict(build_row())
+        row["evaluation_split"] = split
+        row["evaluation_contract_hash"] = contract_hash
+        if reuse_row is not None:
+            row["reused_from_split"] = str(reuse_row["evaluation_split"])
+    if row.get("evaluation_split") != split:
+        raise RuntimeError(f"evaluation row split mismatch at {path}")
+    if row.get("evaluation_contract_hash") != contract_hash:
+        raise RuntimeError(f"evaluation row contract mismatch at {path}")
+    for key, value in expected.items():
+        if row.get(key) != value:
+            raise RuntimeError(f"evaluation row {key} mismatch at {path}")
+    if row.get("test_payload_opened") is not False:
+        raise RuntimeError(f"evaluation row test-access contract mismatch at {path}")
+    prediction_path = Path(str(row.get("prediction_coordinates", "")))
+    if not prediction_path.is_file():
+        raise FileNotFoundError(f"evaluation row coordinate payload is missing: {prediction_path}")
+    if not exists:
+        _write_json(path, row)
+    return row
+
+
+def _evaluate_one(
+    ctx: CapacityContext,
+    spec: ExperimentSpec,
+    init_payload: Mapping[str, Any],
+    train_summary: Mapping[str, Any],
+) -> dict[str, Any]:
     init_payload_depth = init_payload["by_depth"][str(spec.depth)]
     trainer = _make_trainer(ctx, spec, max(int(train_summary["actual_optimizer_updates"]), 1), init_payload_depth["state_dict"], str(init_payload_depth["init_hash"]))
     checkpoint = Path(str(train_summary["final_checkpoint"]))
     trainer.load_checkpoint(checkpoint, map_location=ctx.device)
     trainer.model.eval()
     plan = _make_validation_plan(ctx.data.valid)
-    rows = []
-    prediction_root = ctx.output_dir / spec.experiment_id / "predictions" / "final"
-    cache = LatentFieldCache(mode="ram", max_bytes=512 * 1024**2)
-    for index, sample_id in zip(plan.selected_dataset_indices, plan.selected_sample_ids):
-        for history in HISTORY_SCHEDULE:
-            rows.append(_clip_prediction_row(
-                ctx, trainer, spec, ctx.data.valid, int(index), str(sample_id), history,
-                int(ctx.cfg["evaluation"]["final_steps"]), 0, cache, prediction_root,
-                int(train_summary["actual_optimizer_updates"]),
-            ))
-    subset_rows = []
+    validation_subset = []
     for index, row in enumerate(ctx.data.valid._index):
         parsed = parse_sample_id(str(row[0]))
         if parsed["replica"] == "R1" and parsed["window"] == 30:
-            sample_id = str(row[0])
-            for history in HISTORY_SCHEDULE:
-                for steps in (int(ctx.cfg["evaluation"]["short_steps"]), int(ctx.cfg["evaluation"]["final_steps"])):
-                    for draw_id in (int(value) for value in ctx.cfg["evaluation"]["subset_draws"]):
-                        subset_rows.append(_clip_prediction_row(
-                            ctx, trainer, spec, ctx.data.valid, index, sample_id, history, steps, draw_id,
-                            cache, ctx.output_dir / spec.experiment_id / "predictions" / "subset",
-                            int(train_summary["actual_optimizer_updates"]),
-                        ))
-    train_subset_rows = []
-    for sample_id, dataset, index in _train_evaluation_indices(ctx):
+            validation_subset.append((index, str(row[0])))
+    expected_subset = int(ctx.cfg["evaluation"].get("subset_clips", 8))
+    if len(validation_subset) != expected_subset:
+        raise RuntimeError(
+            f"validation subset has {len(validation_subset)} clips; expected {expected_subset}"
+        )
+    train_subset = _train_evaluation_indices(ctx)
+    checkpoint_sha256 = _sha256(checkpoint)
+    evaluation_code_commit = _git_commit()
+    evaluation_contract = {
+        "schema": "pvb.dit.capacity_data.evaluation_contract.v1",
+        "experiment_id": spec.experiment_id,
+        "source_mode": spec.source_mode,
+        "data_scale": spec.data_scale,
+        "depth": spec.depth,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_step": int(train_summary["actual_optimizer_updates"]),
+        "code_commit": evaluation_code_commit,
+        "data_hash": ctx.data_hash,
+        "codec_state_hash": ctx.codec.codec_state_hash,
+        "statistics_hash": ctx.statistics.hash,
+        "statistics_file_sha256": str(ctx.cfg["candidate"]["statistics_file_sha256"]),
+        "evaluation": ctx.cfg["evaluation"],
+        "histories": list(HISTORY_SCHEDULE),
+        "final_sample_ids": list(plan.selected_sample_ids),
+        "validation_subset_sample_ids": [sample_id for _index, sample_id in validation_subset],
+        "train_subset_sample_ids": [sample_id for sample_id, _dataset, _index in train_subset],
+        "test_payload_opened": False,
+    }
+    evaluation_contract_hash = _canonical_hash(evaluation_contract)
+    run_dir = ctx.output_dir / spec.experiment_id
+    evaluation_contract_payload = {
+        **evaluation_contract,
+        "contract_hash": evaluation_contract_hash,
+    }
+    evaluation_contract_path = run_dir / "evaluation_contract.json"
+    if evaluation_contract_path.is_file():
+        existing_contract = json.loads(
+            evaluation_contract_path.read_text(encoding="utf-8")
+        )
+        if existing_contract != _safe(evaluation_contract_payload):
+            raise RuntimeError(
+                f"evaluation contract mismatch at {evaluation_contract_path}"
+            )
+    else:
+        _write_json(evaluation_contract_path, evaluation_contract_payload)
+    rows = []
+    cache = LatentFieldCache(mode="ram", max_bytes=512 * 1024**2)
+
+    def materialize(
+        split: str,
+        dataset: Any,
+        index: int,
+        sample_id: str,
+        history: int,
+        steps: int,
+        draw_id: int,
+        *,
+        reuse_row: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        row_path = _evaluation_row_path(
+            run_dir, split, sample_id, history, steps, draw_id
+        )
+        return _materialize_evaluation_row(
+            row_path,
+            split=split,
+            contract_hash=evaluation_contract_hash,
+            expected={
+                "experiment_id": spec.experiment_id,
+                "source_mode": spec.source_mode,
+                "data_scale": spec.data_scale,
+                "checkpoint_step": int(train_summary["actual_optimizer_updates"]),
+                "sample_id": sample_id,
+                "history_frames": int(history),
+                "steps": int(steps),
+                "draw_id": int(draw_id),
+            },
+            reuse_row=reuse_row,
+            build_row=lambda: _clip_prediction_row(
+                ctx,
+                trainer,
+                spec,
+                dataset,
+                int(index),
+                sample_id,
+                history,
+                steps,
+                draw_id,
+                cache,
+                run_dir / "predictions" / split,
+                int(train_summary["actual_optimizer_updates"]),
+            ),
+        )
+
+    final_steps = int(ctx.cfg["evaluation"]["final_steps"])
+    for index, sample_id in zip(plan.selected_dataset_indices, plan.selected_sample_ids):
         for history in HISTORY_SCHEDULE:
-            for steps in (int(ctx.cfg["evaluation"]["short_steps"]), int(ctx.cfg["evaluation"]["final_steps"])):
-                for draw_id in (int(value) for value in ctx.cfg["evaluation"]["subset_draws"]):
-                    train_subset_rows.append(_clip_prediction_row(
-                        ctx, trainer, spec, dataset, index, sample_id, history, steps, draw_id,
-                        cache, ctx.output_dir / spec.experiment_id / "predictions" / "train_subset",
-                        int(train_summary["actual_optimizer_updates"]),
-                    ))
-    rows_path = ctx.output_dir / spec.experiment_id / "generation_metrics.jsonl"
-    rows_path.write_text(
-        "".join(json.dumps(_safe(row), sort_keys=True) + "\n" for row in rows + subset_rows + train_subset_rows),
-        encoding="utf-8",
-    )
-    return {
+            rows.append(
+                materialize(
+                    "final",
+                    ctx.data.valid,
+                    int(index),
+                    str(sample_id),
+                    history,
+                    final_steps,
+                    0,
+                )
+            )
+    final_lookup = {
+        (
+            str(row["sample_id"]),
+            int(row["history_frames"]),
+            int(row["steps"]),
+            int(row["draw_id"]),
+        ): row
+        for row in rows
+    }
+    subset_rows = []
+    for index, sample_id in validation_subset:
+        for history in HISTORY_SCHEDULE:
+            for steps in (
+                int(ctx.cfg["evaluation"]["short_steps"]),
+                final_steps,
+            ):
+                for draw_id in (
+                    int(value) for value in ctx.cfg["evaluation"]["subset_draws"]
+                ):
+                    reuse_row = final_lookup.get(
+                        (sample_id, history, steps, draw_id)
+                    )
+                    subset_rows.append(
+                        materialize(
+                            "subset",
+                            ctx.data.valid,
+                            index,
+                            sample_id,
+                            history,
+                            steps,
+                            draw_id,
+                            reuse_row=reuse_row,
+                        )
+                    )
+    train_subset_rows = []
+    for sample_id, dataset, index in train_subset:
+        for history in HISTORY_SCHEDULE:
+            for steps in (
+                int(ctx.cfg["evaluation"]["short_steps"]),
+                final_steps,
+            ):
+                for draw_id in (
+                    int(value) for value in ctx.cfg["evaluation"]["subset_draws"]
+                ):
+                    train_subset_rows.append(
+                        materialize(
+                            "train_subset",
+                            dataset,
+                            index,
+                            sample_id,
+                            history,
+                            steps,
+                            draw_id,
+                        )
+                    )
+    all_rows = rows + subset_rows + train_subset_rows
+    rows_path = run_dir / "generation_metrics.jsonl"
+    _write_jsonl_atomic(rows_path, all_rows)
+    result = {
         "schema": "pvb.dit.capacity_data.evaluation.v1",
         "experiment_id": spec.experiment_id,
         "source_mode": spec.source_mode,
         "data_scale": spec.data_scale,
         "depth": spec.depth,
         "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_step": int(train_summary["actual_optimizer_updates"]),
+        "evaluation_code_commit": evaluation_code_commit,
+        "evaluation_contract_hash": evaluation_contract_hash,
         "final_rows": len(rows),
         "subset_rows": len(subset_rows),
         "train_subset_rows": len(train_subset_rows),
+        "generated_rows": sum(
+            row.get("reused_from_split") is None for row in all_rows
+        ),
+        "reused_rows": sum(
+            row.get("reused_from_split") is not None for row in all_rows
+        ),
         "final_aggregate": _aggregate_generation_rows(rows),
         "subset_aggregate": _aggregate_generation_rows(subset_rows),
         "train_subset_aggregate": _aggregate_generation_rows(train_subset_rows),
         "rows_path": str(rows_path),
         "test_payload_opened": False,
     }
+    _write_json(run_dir / "evaluation_summary.json", result)
+    return result
 
 
 def _finite_number(value: Any) -> float | None:

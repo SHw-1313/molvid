@@ -295,6 +295,58 @@ def test_true_future_occupancy_matches_pairwise_definition() -> None:
     assert result["implementation"] == "bounded_chunk_vectorized"
 
 
+def test_evaluation_rows_resume_from_atomic_contract_shards(tmp_path) -> None:
+    from scripts.run_dit_capacity_data_v1 import _materialize_evaluation_row
+
+    coordinates = tmp_path / "prediction.npz"
+    coordinates.write_bytes(b"compact coordinates")
+    row_path = tmp_path / "rows" / "sample.json"
+    calls = []
+    expected = {
+        "experiment_id": "C48",
+        "sample_id": "sample-a",
+        "history_frames": 4,
+        "steps": 16,
+        "draw_id": 0,
+    }
+
+    def build() -> dict:
+        calls.append("called")
+        return {
+            **expected,
+            "schema": "pvb.dit.capacity_data.generation_row.v1",
+            "prediction_coordinates": str(coordinates),
+            "test_payload_opened": False,
+        }
+
+    first = _materialize_evaluation_row(
+        row_path,
+        split="final",
+        contract_hash="contract-a",
+        expected=expected,
+        build_row=build,
+    )
+    second = _materialize_evaluation_row(
+        row_path,
+        split="final",
+        contract_hash="contract-a",
+        expected=expected,
+        build_row=lambda: pytest.fail("completed row should not be regenerated"),
+    )
+
+    assert first == second
+    assert calls == ["called"]
+    assert not row_path.with_name(row_path.name + ".tmp").exists()
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        _materialize_evaluation_row(
+            row_path,
+            split="final",
+            contract_hash="contract-b",
+            expected=expected,
+            build_row=build,
+        )
+
+
 def test_cuda_legacy_both_path_builds_independent_trainable_models(tmp_path) -> None:
     from scripts.run_dit_source_ab import ExperimentContext, _make_trainer, _shared_initialization
 
