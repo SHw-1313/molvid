@@ -20,15 +20,15 @@
 
 - tmux session `dit-capacity-train` on GPU0 runs independent Python processes in order: G48, C48, C48D8. Evaluation is not part of this queue.
 - Canonical training/numerical code commit: `c070e3c2aeecb6dc33d338e2429bfb426876faac`.
-- Evaluation/reporting code is committed separately through `98b5af3` on the host and is intentionally not synced while the training queue can still launch later arms.
+- Evaluation/reporting code is committed separately through `36880c8` on the host and is intentionally not synced while the training queue can still launch later arms. The true future occupancy calculation is now an equivalent bounded-chunk vectorized implementation rather than one CUDA launch per atom pair.
 - Atomic checkpoints are written every 500 successful updates; resume truncates trailing JSONL rows to the checkpoint step before continuing.
-- G48 has valid checkpoints through step 2000. Its fixed step-2000 monitor has 16/16 coordinate files and 16/16 metric rows, and training has continued past step 2000.
+- G48 is complete and PASS at 4,500 updates and exactly 267,988,032 effective tokens. It has 9 RF validations, two complete 16-row real-generation monitors, and used 2.357 GPU-hours. C48 started fresh and its initial batch/H/tau sequence matches G48.
 - Run root: `/workspace/molvid-dit-capacity-data-v1/outputs/dit_capacity_data_v1/20260914_capacity_data_v1`.
 
 ## Pending
 
 - Inspect training/evaluation outputs and failure status when the tmux queue exits.
-- After all three training processes exit, sync `98b5af3`, run its CUDA metric regressions, and then start final evaluation on an actually idle neibu GPU.
+- After all three training processes exit, sync `36880c8`, run its CUDA metric/occupancy regressions and end-to-end timing, and then start final evaluation on an actually idle neibu GPU.
 - Sync compact evidence/checkpoints needed for handoff back to the B host worktree.
 - Finish `report.md`, learning curves, per-system results, and final `HANDOFF.md`.
 - Train C192 only if a local GPU becomes genuinely idle while the full expanded view remains available; do not copy the large payload to neibu.

@@ -23,7 +23,7 @@ CPU checks passed:
 - `python -m pytest -q tests/test_dit_capacity_data_v1.py -k 'not cuda'`
 - `python -m pytest -q tests/test_dit_trainer.py tests/test_dit_pilot_runner.py tests/test_dit_source_ab.py -k 'not cuda'`
 
-Latest host-container counts are 7/7 capacity CPU tests and 15/15 combined codec/capacity/source
+Latest host-container counts are 8/8 capacity CPU tests and 16/16 combined codec/capacity/source
 tests; 3 gated CUDA tests were deselected in that host run. The earlier neibu CUDA gate passed 2/2.
 
 The preflight was rerun from the correct container cwd `/workspace/molvid-dit-capacity-data-v1`
@@ -70,12 +70,14 @@ each sampler/decode metric pass. G48 was restored from checkpoint 1500; the exis
 atomically truncated, step 2000 was reproduced, all 16 fixed H4/H8 monitor clips and metric rows
 completed, and training continued past step 2000.
 
-Evaluation/reporting code through commit `98b5af3` adds H4/H8 plus L4/L8/future draw-to-clip-to-system
+Evaluation/reporting code through commit `36880c8` adds H4/H8 plus L4/L8/future draw-to-clip-to-system
 aggregates, per-system output, block-displacement ratios, and nullable constant RMSF/ACF/Pearson
 handling. Missing torsion indices remain null, and legacy occupancy/empty diversity are excluded
 from formal aggregates. It is committed only in the host worktree for now. Do not sync it to neibu until the
 G48→C48→C48D8 queue has exited, because later arms are launched from the shared remote source tree.
-After sync, run its CUDA metric regressions before final evaluation.
+The separate true future occupancy metric now uses bounded 65,536-pair CUDA chunks with the same
+per-pair temporal-occupancy definition; this removes hundreds of thousands of scalar launches per
+clip without reducing the protocol. After sync, run its CUDA equivalence/timing checks before final evaluation.
 
 The first formal checkpoint, `G48/checkpoints/checkpoint_step000500.pt`, was written successfully
 (134,315,877 bytes). Inspection found step/successful_updates/capacity_successful_updates all 500,
@@ -83,8 +85,11 @@ cursor `{epoch: 0, batch_index: 500}`, 28,951,104 tokens, 166 optimizer state en
 scaler fields, and generator-state SHA256
 `2813e1e20d7dba2bbe87db48d148130a06b3d06a86e5a380e061d375a674c940`.
 
-G48 also has durable checkpoints at steps 1000, 1500, and 2000. At 21:16 CST on 2026-09-14,
-`train_history.jsonl` had reached step 2011 after the successful monitor.
+G48 completed PASS at 4,500 successful updates and exactly 267,988,032 effective atom-frame tokens.
+Its final checkpoint is durable; it recorded 9 RF validation rows, two 16-row real-generation
+monitors at steps 2000/4000, and 2.357 estimated GPU-hours. C48 then started as a fresh process.
+The first 16 C48 rows matched G48 exactly for epoch, batch index/tokens, H, and tau min/mean/max;
+losses differ as expected because only the source center changes.
 
 An initial G48 process was stopped at step 89 before it had a checkpoint, specifically to add the
 periodic checkpoint and resume-history guarantees. That evidence is preserved under
