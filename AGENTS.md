@@ -125,3 +125,31 @@ The operator has authorized the next stage on the existing `perf/dit-factorized-
 - Implement before testing; targeted CUDA checks precede real smoke and directly affected regression. Do not start with full-repository pytest.
 - New artifacts belong under `outputs/dit_source_ab_v1/`. Do not overwrite old outputs or open test payloads. Do not push, create PRs, merge/rebase or start extra coding agents.
 - Follow the new budget and final-status rules. Finish at `SOURCE_AB_V1_COMPLETE_FOR_REVIEW`, `SOURCE_AB_V1_PARTIAL_BUDGET` or `SOURCE_AB_V1_BLOCKED` with evidence.
+
+## Active transition — Session A source checkpoint reassessment v2, 2026-09-14
+
+This transition is the current user-authorized A session and supersedes the preceding
+source-A/B implementation and training order only for this reassessment. Stay on
+`perf/dit-factorized-backend-v2` at baseline `5c2754fcce44ed77dad77db09db709408fee7634`;
+do not switch branches, create a worktree, import active B work, or train any model.
+
+- Evaluate the existing R4 Gaussian/conditional `checkpoint_step020000.pt` files as the
+  shared-adapter legacy diagnostic. Keep the codec, RF semantics, trainer semantics, model
+  implementation, manifests, and statistics frozen; do not interpret the two checkpoint
+  difference as an independent source ablation.
+- Read the old source-A/B JSONL and checkpoint outputs only. Never open test payloads. New
+  A-specific entrypoints, helpers, tests, metadata, compact predictions, plots, and reports
+  belong under `outputs/dit_source_reassessment_v2/<run_id>/` and must not overwrite old
+  outputs.
+- The A-owned implementation scope is limited to reassessment/evaluation/reporting code and
+  targeted correctness tests. Preserve unrelated user changes and do not edit B's future
+  worktree or source files outside that scope.
+- Use the original eight validation systems, eight train-selected clips, R1/window30, H4/H8,
+  8/16/32-step Euler diagnostics, fixed-epsilon draw pairing, and the bounded H8 short rollout
+  defined by the current user prompt. Train/validation only; test remains sealed.
+- All model, scientific, test, smoke, evaluation, and plotting commands run through
+  `enter-container` with `conda activate torch-ito` on one confirmed idle CUDA GPU. Metadata,
+  I/O, and aggregation may use CPU. Do not share, preempt, or terminate another process.
+- Finish with a self-contained `report.md`, per-clip/per-frame results, exact commands, a brief
+  HANDOFF update, and a local commit if the evidence is complete; report unavailable CUDA or
+  rollout data explicitly rather than fabricating coverage.
