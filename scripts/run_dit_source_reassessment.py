@@ -42,6 +42,7 @@ from evaluation.dit_reassessment import (
     reaggregate_legacy_jsonl,
     seed_contract,
     sha256_file,
+    tensor_bytes_hash,
 )
 from module.latent_flow_source import build_observed_center
 from scripts.run_dit_source_ab import (
@@ -389,11 +390,11 @@ def _load_models(ctx: Any, cfg: Mapping[str, Any]) -> tuple[dict[str, torch.nn.M
     return models, metadata
 
 
-def _clip_record_metadata(row: Mapping[str, Any], *, split: str) -> dict[str, Any]:
-    parsed = parse_sample_id(str(row["sample_id"]))
+def _clip_record_metadata(sample_id: str, *, split: str) -> dict[str, Any]:
+    parsed = parse_sample_id(str(sample_id))
     return {
         "split": split,
-        "sample_id": str(row["sample_id"]),
+        "sample_id": str(sample_id),
         "system": parsed["system"],
         "replica": parsed["replica"],
         "window": int(parsed["window"]),
@@ -416,7 +417,7 @@ def _prepare_clip(ctx: Any, dataset: ClipMMapDataset, index: int) -> tuple[Any, 
         origin_from_latent=True,
         loss_mask=batch.loss_mask,
     )
-    return latent, batch, target_batch, _clip_record_metadata(dataset._index[int(index)], split="")
+    return latent, batch, target_batch, _clip_record_metadata(dataset._index[int(index)][0], split="")
 
 
 def _small_center_meta(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -445,7 +446,8 @@ def _evaluate(cfg: Mapping[str, Any], output_dir: Path, device: torch.device) ->
         statistics = ctx.statistics.to(device=device)
         for split in ("valid", "train"):
             dataset = ctx.data.valid if split == "valid" else ctx.data.train
-            for clip in plan["selection"][split]:
+            selection_key = "validation" if split == "valid" else split
+            for clip in plan["selection"][selection_key]:
                 latent, batch, target_batch, clip_meta = _prepare_clip(
                     ctx, dataset, int(clip["dataset_index"])
                 )
