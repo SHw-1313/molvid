@@ -1649,6 +1649,40 @@ def _monitor(
     }
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    rows = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            if index != len(lines) - 1:
+                raise
+            break
+    return rows
+
+
+def _write_jsonl_atomic(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        "".join(json.dumps(_safe(row), sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _truncate_history_to_checkpoint(path: Path, checkpoint_step: int) -> list[dict[str, Any]]:
+    rows = _read_jsonl(path)
+    retained = [row for row in rows if int(row.get("step", -1)) <= int(checkpoint_step)]
+    _write_jsonl_atomic(path, retained)
+    return retained
+
+
 def _train_one(
     ctx: CapacityContext,
     spec: ExperimentSpec,
@@ -1658,6 +1692,28 @@ def _train_one(
     monitor_indices: Sequence[tuple[str, Any, int]],
     resume: bool,
 ) -> dict[str, Any]:
+    run_dir = ctx.output_dir / spec.experiment_id
+    train_history_path = run_dir / "train_history.jsonl"
+    validation_history_path = run_dir / "validation_history.jsonl"
+    monitor_history_path = run_dir / "monitor_history.json"
+    latest_checkpoint = run_dir / "latest.pt"
+    if not resume:
+        existing = [
+            path
+            for path in (
+                train_history_path,
+                validation_history_path,
+                monitor_history_path,
+                latest_checkpoint,
+                run_dir / "train_summary.json",
+            )
+            if path.exists()
+        ]
+        if existing:
+            raise RuntimeError(
+                f"fresh {spec.experiment_id} run refuses existing artifacts: "
+                + ", ".join(str(path) for path in existing)
+            )
     depth_payload = init_payload["by_depth"][str(spec.depth)]
     init_state = depth_payload["state_dict"]
     init_hash = str(depth_payload["init_hash"])
@@ -1672,18 +1728,35 @@ def _train_one(
     tokens_seen = 0
     schedule_hash = ""
     if resume:
-        checkpoint = ctx.output_dir / spec.experiment_id / "latest.pt"
-        if not checkpoint.is_file():
-            raise FileNotFoundError(f"resume checkpoint missing for {spec.experiment_id}: {checkpoint}")
+        if not latest_checkpoint.is_file():
+            raise FileNotFoundError(
+                f"resume checkpoint missing for {spec.experiment_id}: {latest_checkpoint}"
+            )
         cursor, generator_state, tokens_seen, schedule_hash = _restore_checkpoint(
-            ctx, trainer, spec, checkpoint, init_hash, spec.data_scale
+            ctx, trainer, spec, latest_checkpoint, init_hash, spec.data_scale
         )
         generator.set_state(generator_state)
     target_tokens = int(budget["selected_target_tokens"])
     started = time.perf_counter()
-    train_rows = []
-    validation_rows = []
-    monitor_rows = []
+    if resume:
+        train_rows = _truncate_history_to_checkpoint(train_history_path, trainer.step)
+        validation_rows = _truncate_history_to_checkpoint(validation_history_path, trainer.step)
+        if monitor_history_path.is_file():
+            loaded_monitor_rows = json.loads(monitor_history_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_monitor_rows, list):
+                raise RuntimeError(f"invalid monitor history for {spec.experiment_id}")
+            monitor_rows = [
+                row
+                for row in loaded_monitor_rows
+                if int(row.get("step", -1)) <= trainer.step
+            ]
+            _write_json(monitor_history_path, monitor_rows)
+        else:
+            monitor_rows = []
+    else:
+        train_rows = []
+        validation_rows = []
+        monitor_rows = []
     center_cache = LatentFieldCache(
         mode=str(ctx.cfg["cache"]["mode"]),
         max_bytes=int(float(ctx.cfg["cache"]["ram_gib"]) * 1024**3),
@@ -1713,16 +1786,16 @@ def _train_one(
             "batch_index": int(cursor["batch_index"]),
         })
         train_rows.append(row)
-        _append_jsonl(ctx.output_dir / spec.experiment_id / "train_history.jsonl", row)
+        _append_jsonl(train_history_path, row)
         step = trainer.successful_updates
         if step % int(ctx.cfg["schedule"]["validation_interval"]) == 0 or step in CHECKPOINT_STEPS:
             validation = _validation_rf(ctx, trainer, plan, spec, step)
             validation["tokens_seen"] = tokens_seen
             validation_rows.append(validation)
-            _append_jsonl(ctx.output_dir / spec.experiment_id / "validation_history.jsonl", validation)
+            _append_jsonl(validation_history_path, validation)
         if step % int(ctx.cfg["schedule"]["generation_interval"]) == 0:
             monitor_rows.append(_monitor(ctx, trainer, spec, step, monitor_indices))
-            _write_json(ctx.output_dir / spec.experiment_id / "monitor_history.json", monitor_rows)
+            _write_json(monitor_history_path, monitor_rows)
         if (
             step % int(ctx.cfg["schedule"]["checkpoint_interval"]) == 0
             or step in CHECKPOINT_STEPS
@@ -1837,12 +1910,6 @@ def _train(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec], resume: bo
         "contract_hash": contract["contract_hash"],
         "test_payload_opened": False,
     }
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _evaluate_one(ctx: CapacityContext, spec: ExperimentSpec, init_payload: Mapping[str, Any], train_summary: Mapping[str, Any]) -> dict[str, Any]:

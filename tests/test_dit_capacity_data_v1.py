@@ -166,6 +166,24 @@ def test_batch_plan_is_built_once_per_epoch() -> None:
     assert sampler.calls == [0, 1]
 
 
+def test_resume_history_is_atomically_truncated_to_checkpoint(tmp_path) -> None:
+    from scripts.run_dit_capacity_data_v1 import _read_jsonl, _truncate_history_to_checkpoint
+
+    path = tmp_path / "train_history.jsonl"
+    path.write_text(
+        '{"step": 1, "loss": 3.0}\n'
+        '{"step": 2, "loss": 2.0}\n'
+        '{"step": 3, "loss": 1.0}\n'
+        '{"step":',
+        encoding="utf-8",
+    )
+    retained = _truncate_history_to_checkpoint(path, 2)
+
+    assert [row["step"] for row in retained] == [1, 2]
+    assert _read_jsonl(path) == retained
+    assert not (tmp_path / "train_history.jsonl.tmp").exists()
+
+
 def test_cuda_legacy_both_path_builds_independent_trainable_models(tmp_path) -> None:
     from scripts.run_dit_source_ab import ExperimentContext, _make_trainer, _shared_initialization
 
