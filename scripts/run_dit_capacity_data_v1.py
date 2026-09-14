@@ -64,6 +64,7 @@ from scripts.run_dit_source_ab import (
     _bond_rmse,
     _coordinate_rms,
     _merge_center_with_observed,
+    _source_metric_row,
 )
 from scripts.run_state_detail_dit_pilot import (
     FrozenCodec,
