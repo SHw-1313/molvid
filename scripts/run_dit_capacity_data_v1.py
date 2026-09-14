@@ -1489,43 +1489,6 @@ def _corrected_dynamics(prediction: Tensor, target: Tensor, batch: Any, history:
     return {"rmsf": rmsf, "velocity_lag1_acf": dynamic}
 
 
-def _sanitize_degenerate_correlations(metrics: dict[str, Any]) -> None:
-    """Turn legacy zero-variance correlation sentinels into JSON nulls."""
-
-    def sanitize_temporal(temporal: Any) -> None:
-        if not isinstance(temporal, dict):
-            return
-        rmsf = temporal.get("rmsf")
-        if isinstance(rmsf, dict):
-            pred = rmsf.get("prediction")
-            target = rmsf.get("target")
-            if (
-                isinstance(pred, (int, float))
-                and isinstance(target, (int, float))
-                and (float(pred) <= 1.0e-5 or float(target) <= 1.0e-5)
-            ):
-                rmsf["correlation"] = None
-                rmsf["correlation_reason"] = "zero_variance_rmsf_series"
-        dynamic = temporal.get("dynamic")
-        if isinstance(dynamic, dict):
-            pred = rmsf.get("prediction") if isinstance(rmsf, dict) else None
-            target = rmsf.get("target") if isinstance(rmsf, dict) else None
-            if (
-                isinstance(pred, (int, float))
-                and isinstance(target, (int, float))
-                and (float(pred) <= 1.0e-5 or float(target) <= 1.0e-5)
-            ):
-                for key in ("prediction", "target", "dynamic_correlation", "dynamic_correlation_absolute_error"):
-                    if key in dynamic:
-                        dynamic[key] = None
-                dynamic["reason"] = "zero_variance_future_velocity_series"
-
-    sanitize_temporal(metrics.get("temporal", {}).get("future"))
-    for horizon in metrics.get("horizons", {}).values():
-        if isinstance(horizon, dict):
-            sanitize_temporal(horizon.get("temporal"))
-
-
 def _save_prediction(path: Path, coordinates: Tensor) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp.npz")
@@ -1576,7 +1539,6 @@ def _clip_prediction_row(
     _sync(ctx.device)
     torch.cuda.empty_cache()
     metrics = trajectory_metric_record(decoded, batch.x.float(), batch, history)
-    _sanitize_degenerate_correlations(metrics)
     corrected = _corrected_dynamics(decoded, batch.x.float(), batch, history)
     future = metrics.get("future", {})
     output_name = f"{spec.experiment_id}__{sample_id.replace('/', '_')}__H{history}__L{steps}__draw{draw_id}.npz"
@@ -2004,7 +1966,6 @@ def _generation_region_values(row: Mapping[str, Any], region: str) -> dict[str, 
         "drmsd",
         "bond_rmse",
         "contact_f1",
-        "contact_occupancy_mae",
     ):
         number = _finite_number(metric_values.get(key))
         if number is not None:
@@ -2126,6 +2087,10 @@ def _aggregate_generation_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, A
             "sampling_steps": steps,
             "regions": regions,
             "region_contract": "L4/L8 are forecast horizons; future is every unobserved frame",
+            "excluded_metrics": {
+                "contact_occupancy_mae": "legacy per-frame contact error; not treated as trajectory occupancy",
+                "diversity": "not implemented reliably in this phase",
+            },
         })
         output[f"H{history}_L{steps}"] = value
     return output

@@ -73,6 +73,7 @@ def test_controls_are_separated_by_bucket_and_frame0():
         assert key in metrics["frame0"] and key in metrics["future"]
     for key in ("velocity_rmse", "acceleration_rmse", "frequency_retention"):
         assert key in metrics
+    assert metrics["future"]["torsion_change"] is None
 
 
 def test_json_and_markdown_report_roundtrip(tmp_path: Path):
@@ -181,3 +182,4 @@ def test_constant_rmsf_and_velocity_correlations_are_null():
     assert dynamic["prediction"] is None
     assert dynamic["target"] is None
     assert dynamic["dynamic_correlation"] is None
+    assert _metrics(coordinates, coordinates, batch)["future"]["torsion_change"] is None

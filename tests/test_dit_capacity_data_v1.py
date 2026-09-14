@@ -258,6 +258,9 @@ def test_generation_aggregation_is_draw_clip_system_and_retains_regions() -> Non
     assert aggregate["regions"]["future"]["system_equal"][
         "between_block_displacement_ratio"
     ] == 3.125
+    assert "contact_occupancy_mae" not in aggregate["system_equal"]
+    assert "contact_occupancy_mae" in aggregate["excluded_metrics"]
+    assert "diversity" in aggregate["excluded_metrics"]
     assert aggregate["sampling_steps"] == 16
 
 

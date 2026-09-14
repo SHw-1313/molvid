@@ -457,13 +457,19 @@ def _dihedral(points: Tensor) -> Tensor:
     return torch.atan2((torch.cross(b1, v, dim=-1) * w).sum(-1), (v * w).sum(-1))
 
 
-def _torsion_change(prediction: Tensor, target: Tensor, batch: Any, mask: Tensor, frames: Sequence[int]) -> float:
+def _torsion_change(
+    prediction: Tensor,
+    target: Tensor,
+    batch: Any,
+    mask: Tensor,
+    frames: Sequence[int],
+) -> float | None:
     torsions = _field(batch, "torsion_index")
     if torsions is None:
-        return 0.0
+        return None
     torsions = torch.as_tensor(torsions, device=prediction.device, dtype=torch.long)
     if torsions.numel() == 0:
-        return 0.0
+        return None
     if torsions.ndim != 2 or torsions.shape[0] != 4:
         raise ValueError("torsion_index must have shape [4, Q]")
     values = []
@@ -473,7 +479,7 @@ def _torsion_change(prediction: Tensor, target: Tensor, batch: Any, mask: Tensor
             pred_angle = _dihedral(prediction[frame, torsions].transpose(0, 1))[valid]
             target_angle = _dihedral(target[frame, torsions].transpose(0, 1))[valid]
             values.append(_wrap_angle(pred_angle - target_angle).abs())
-    return _safe_mean(torch.cat(values)) if values else 0.0
+    return _safe_mean(torch.cat(values)) if values else None
 
 
 def _frequency_retention(prediction: Tensor, target: Tensor, mask: Tensor) -> float:
@@ -909,7 +915,7 @@ def _metrics(
         future = list(range(history, total_frames))
     all_frames = list(range(prediction.shape[0]))
 
-    def one(frames: Sequence[int]) -> dict[str, float]:
+    def one(frames: Sequence[int]) -> dict[str, Any]:
         contacts = contact_metrics(prediction, target, batch, mask, frames)
         raw_rmsd = _rmsd(prediction, target, mask, frames)
         return {
@@ -1028,16 +1034,21 @@ def model_control(
     )
 
 
-def _mean_records(records: list[dict[str, dict[str, float]]]) -> dict[str, Any]:
+def _mean_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         return {"frame0": {}, "future": {}, "all_frames": {}}
     result: dict[str, Any] = {}
     for section in ("frame0", "future", "all_frames"):
         keys = records[0][section]
-        result[section] = {
-            key: sum(record[section][key] for record in records) / len(records)
-            for key in keys
-        }
+        result[section] = {}
+        for key in keys:
+            values = [
+                float(record[section][key])
+                for record in records
+                if isinstance(record[section].get(key), (int, float))
+                and math.isfinite(float(record[section][key]))
+            ]
+            result[section][key] = sum(values) / len(values) if values else None
     for key in ("velocity_rmse", "acceleration_rmse", "frequency_retention"):
         result[key] = sum(record[key] for record in records) / len(records)
     return result
