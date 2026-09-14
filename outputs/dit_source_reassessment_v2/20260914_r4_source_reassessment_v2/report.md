@@ -7,7 +7,7 @@ The frozen R4 codec/statistics, DiT/RF semantics, train/validation manifests, an
 
 ## Inputs and selection
 
-- Code HEAD: `972d83fc31280b23b3ffcd25a740c6cab455d47a`; required baseline: `5c2754fcce44ed77dad77db09db709408fee7634`.
+- Code HEAD: `f9a23b2c01e1c4ea39342bd114b3f43c9fedabaf`; required baseline: `5c2754fcce44ed77dad77db09db709408fee7634`.
 - Legacy JSONL row check by arm: `True`; per-arm counts `{'conditional': {'main_batch': 52, 'subset_clip': 128}, 'gaussian': {'main_batch': 52, 'subset_clip': 128}}` vs expected `{'main_batch': 52, 'subset_clip': 128}`. Main batch rows were never split into fake systems.
 - Validation selection: `8` systems, fixed R1/window30; train selection: `8` sorted systems, one preselected clip each.
 - Test payload opened: `false`.
