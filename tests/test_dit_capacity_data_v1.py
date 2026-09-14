@@ -264,6 +264,37 @@ def test_generation_aggregation_is_draw_clip_system_and_retains_regions() -> Non
     assert aggregate["sampling_steps"] == 16
 
 
+def test_true_future_occupancy_matches_pairwise_definition() -> None:
+    from scripts.run_dit_capacity_data_v1 import _true_occupancy_mae
+
+    prediction = torch.tensor(
+        [
+            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [-3.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
+        ]
+    )
+    target = torch.tensor(
+        [
+            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+        ]
+    )
+    batch = SimpleNamespace(
+        loss_mask=torch.ones(3, dtype=torch.bool),
+        abid=torch.zeros(3, dtype=torch.long),
+        bond_index=torch.tensor([[0], [1]], dtype=torch.long),
+    )
+    result = _true_occupancy_mae(prediction, target, batch, history=1)
+
+    # The bond (0,1) is excluded. Pair (0,2) differs for one of two future
+    # frames, while pair (1,2) has identical occupancy: mean MAE = (0.5+0)/2.
+    assert result["value"] == 0.25
+    assert result["pair_count"] == 2
+    assert result["implementation"] == "bounded_chunk_vectorized"
+
+
 def test_cuda_legacy_both_path_builds_independent_trainable_models(tmp_path) -> None:
     from scripts.run_dit_source_ab import ExperimentContext, _make_trainer, _shared_initialization
 

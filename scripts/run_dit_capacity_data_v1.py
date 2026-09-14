@@ -1466,20 +1466,41 @@ def _true_occupancy_mae(prediction: Tensor, target: Tensor, batch: Any, history:
     atoms = int(prediction.shape[1])
     if atoms > 2048:
         return {"value": None, "reason": "not_computed_for_atoms_over_2048"}
-    pairs = _nonbond_pairs(batch, atoms, prediction.device)
-    if pairs[0].numel() == 0:
+    source, destination = _nonbond_pairs(batch, atoms, prediction.device)
+    if source.numel() == 0:
         return {"value": None, "reason": "no_nonbond_pairs"}
-    values = []
-    for source, destination in zip(pairs[0].tolist(), pairs[1].tolist()):
-        valid = batch.loss_mask.to(device=prediction.device, dtype=torch.bool)[source] & batch.loss_mask.to(device=prediction.device, dtype=torch.bool)[destination]
-        if not bool(valid):
-            continue
-        pred_distance = torch.linalg.vector_norm(prediction[history:, source] - prediction[history:, destination], dim=-1)
-        target_distance = torch.linalg.vector_norm(target[history:, source] - target[history:, destination], dim=-1)
-        values.append((pred_distance < 4.5).float().mean() - (target_distance < 4.5).float().mean())
-    if not values:
+    valid_atoms = batch.loss_mask.to(device=prediction.device, dtype=torch.bool)
+    pair_valid = valid_atoms.index_select(0, source) & valid_atoms.index_select(0, destination)
+    source = source[pair_valid]
+    destination = destination[pair_valid]
+    pair_count = int(source.numel())
+    if pair_count == 0 or history >= int(prediction.shape[0]):
         return {"value": None, "reason": "no_valid_future_nonbond_pairs"}
-    return {"value": float(torch.stack(values).abs().mean().cpu()), "pair_count": len(values), "cutoff_angstrom": 4.5}
+    chunk_size = 65_536
+    absolute_error_sum = torch.zeros((), device=prediction.device, dtype=torch.float64)
+    for start in range(0, pair_count, chunk_size):
+        chunk_source = source[start : start + chunk_size]
+        chunk_destination = destination[start : start + chunk_size]
+        pred_distance = torch.linalg.vector_norm(
+            prediction[history:, chunk_source] - prediction[history:, chunk_destination],
+            dim=-1,
+        )
+        target_distance = torch.linalg.vector_norm(
+            target[history:, chunk_source] - target[history:, chunk_destination],
+            dim=-1,
+        )
+        pred_occupancy = (pred_distance < 4.5).float().mean(dim=0)
+        target_occupancy = (target_distance < 4.5).float().mean(dim=0)
+        absolute_error_sum += (pred_occupancy - target_occupancy).abs().sum(
+            dtype=torch.float64
+        )
+    return {
+        "value": float((absolute_error_sum / pair_count).cpu()),
+        "pair_count": pair_count,
+        "cutoff_angstrom": 4.5,
+        "implementation": "bounded_chunk_vectorized",
+        "pair_chunk_size": chunk_size,
+    }
 
 
 def _corrected_dynamics(prediction: Tensor, target: Tensor, batch: Any, history: int) -> dict[str, Any]:
