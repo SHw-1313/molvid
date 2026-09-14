@@ -264,27 +264,28 @@ def test_generation_aggregation_is_draw_clip_system_and_retains_regions() -> Non
     assert aggregate["sampling_steps"] == 16
 
 
-def test_true_future_occupancy_matches_pairwise_definition() -> None:
+def test_cuda_true_future_occupancy_matches_pairwise_definition() -> None:
     from scripts.run_dit_capacity_data_v1 import _true_occupancy_mae
 
+    device = _require_cuda()
     prediction = torch.tensor(
         [
             [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
             [[0.0, 0.0, 0.0], [-3.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
             [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
         ]
-    )
+    ).to(device)
     target = torch.tensor(
         [
             [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
             [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
             [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
         ]
-    )
+    ).to(device)
     batch = SimpleNamespace(
-        loss_mask=torch.ones(3, dtype=torch.bool),
-        abid=torch.zeros(3, dtype=torch.long),
-        bond_index=torch.tensor([[0], [1]], dtype=torch.long),
+        loss_mask=torch.ones(3, dtype=torch.bool, device=device),
+        abid=torch.zeros(3, dtype=torch.long, device=device),
+        bond_index=torch.tensor([[0], [1]], dtype=torch.long, device=device),
     )
     result = _true_occupancy_mae(prediction, target, batch, history=1)
 
@@ -293,6 +294,16 @@ def test_true_future_occupancy_matches_pairwise_definition() -> None:
     assert result["value"] == 0.25
     assert result["pair_count"] == 2
     assert result["implementation"] == "bounded_chunk_vectorized"
+
+
+def test_cuda_constant_pearson_is_null() -> None:
+    from evaluation.codec_evaluation import _safe_correlation
+
+    device = _require_cuda()
+    constant = torch.ones(32, device=device)
+    varying = torch.arange(32, device=device, dtype=torch.float32)
+    assert _safe_correlation(constant, constant) is None
+    assert _safe_correlation(constant, varying) is None
 
 
 def test_evaluation_rows_resume_from_atomic_contract_shards(tmp_path) -> None:
