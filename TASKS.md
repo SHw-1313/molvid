@@ -18,4 +18,4 @@
 ## Current blockers
 
 - No confirmed idle GPU: all eight GPUs were occupied at the last check. Do not preempt those jobs.
-- In this agent's `enter-container`, `/data4` is mounted read-only. Numerical Python/tests can read B, but output/checkpoint writes require the tmux/container setup to expose a writable B path (or an explicitly synchronized staging path).
+- Inside `enter-container`, use `/workspace/molvid-dit-capacity-data-v1`: this is the writable mapping of the host B worktree. The host-absolute workspace path under `/data4/users/sihao/workspace` is read-only inside the container. The approved source data under `/data4/users/sihao/data/.../dt_100ps` remains read-only by design.
