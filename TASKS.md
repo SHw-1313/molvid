@@ -14,7 +14,8 @@
 ## Running on neibu
 
 - tmux session `dit-capacity-train` on GPU0 runs independent Python processes in order: G48, C48, C48D8, final evaluation, summarize.
-- Canonical numerical code commit: `cbe9394a6c46e6fc35b02addf7e5b1061662abf8`.
+- Canonical numerical code commit: `b68dafa968b72519e976f795b7611673c1154a0f`.
+- Atomic checkpoints are written every 500 successful updates; resume truncates trailing JSONL rows to the checkpoint step before continuing.
 - Run root: `/workspace/molvid-dit-capacity-data-v1/outputs/dit_capacity_data_v1/20260914_capacity_data_v1`.
 
 ## Pending
@@ -23,6 +24,10 @@
 - Sync compact evidence/checkpoints needed for handoff back to the B host worktree.
 - Finish `report.md`, learning curves, per-system results, and final `HANDOFF.md`.
 - Train C192 only if a local GPU becomes genuinely idle while the full expanded view remains available; do not copy the large payload to neibu.
+
+The first 89-step G48 launch was intentionally stopped before any checkpoint while the recovery
+audit was tightened. Its files are preserved separately as
+`G48_interrupted_precheckpoint_step000089` and are excluded from the formal run.
 
 ## Explicit blocker
 

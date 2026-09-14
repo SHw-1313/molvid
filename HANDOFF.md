@@ -47,12 +47,20 @@ CUDA evidence on neibu GPU0 passed:
 - Source geometry check passed for all 8 validation systems at H4/H8; template raw RMSD is about 0.021--0.024 A and template bond RMSE about 0.012--0.013 A.
 
 The frozen prepare contract uses numerical code commit
-`cbe9394a6c46e6fc35b02addf7e5b1061662abf8`, contract hash
-`99393586bef7c6a851d3b11945be6b0c90255c196d3a923fbbb6732788566375`, 4,500 successful
+`b68dafa968b72519e976f795b7611673c1154a0f`, contract hash
+`ce9eefe5484e8b3f51e6c5c7edb314bd991634d744b952bc051a145db3f85fbe`, 4,500 successful
 updates, and 267,988,032 effective atom-frame tokens. Measured p90 end-to-end update times are
-1.574 s (G48), 2.997 s (C48), and 3.097 s (C48D8); C192 reserves a conservative 3.871 s.
+1.589 s (G48), 3.014 s (C48), and 3.120 s (C48D8); C192 reserves a conservative 3.900 s.
+Atomic checkpoints are written every 500 successful updates. Resume restores the checkpointed
+cursor/generator/optimizer/scaler/token count and atomically truncates any trailing JSONL rows,
+while a fresh launch refuses existing formal-run artifacts.
 
 Current asynchronous work is the neibu tmux session `dit-capacity-train` on GPU0. It runs separate
-Python processes in order G48, C48, C48D8, evaluate, summarize. Logs and progress are under
+Python training processes in order G48, C48, C48D8. Evaluation is intentionally left for the next
+audit step so required per-system aggregations can be checked first. Logs and progress are under
 `outputs/dit_capacity_data_v1/20260914_capacity_data_v1/`; inspect the active arm's
 `train_history.jsonl` and do not launch another GPU0 job concurrently.
+
+An initial G48 process was stopped at step 89 before it had a checkpoint, specifically to add the
+periodic checkpoint and resume-history guarantees. That evidence is preserved under
+`G48_interrupted_precheckpoint_step000089` and is not part of the formal learning curve.
