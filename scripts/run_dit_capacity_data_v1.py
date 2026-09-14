@@ -1486,19 +1486,6 @@ def _corrected_dynamics(prediction: Tensor, target: Tensor, batch: Any, history:
     future = tuple(range(history, int(prediction.shape[0])))
     rmsf = aligned_rmsf_metrics(prediction, target, batch, frames=future)
     dynamic = dynamic_acf_metrics(prediction, target, batch, frames=future)
-    # The legacy evaluator's zero-variance convention is not an applicable
-    # correlation.  Keep RMSF=0 valid, but report ACF/Pearson as null.
-    if dynamic.get("dynamic_correlation") in (0.0, 1.0) and (
-        rmsf.get("prediction", 0.0) <= 1.0e-5 or rmsf.get("target", 0.0) <= 1.0e-5
-    ):
-        dynamic = {
-            "prediction": None,
-            "target": None,
-            "dynamic_correlation": None,
-            "reason": "near_zero_future_velocity_variance",
-            "lag": 1,
-            "units": "angstrom_per_ps",
-        }
     return {"rmsf": rmsf, "velocity_lag1_acf": dynamic}
 
 
@@ -1994,11 +1981,134 @@ def _evaluate_one(ctx: CapacityContext, spec: ExperimentSpec, init_payload: Mapp
     }
 
 
-def _numeric_future(row: Mapping[str, Any], key: str) -> float | None:
-    value: Any = row.get("metrics", {}).get("future", {}).get(key)
+def _finite_number(value: Any) -> float | None:
     if isinstance(value, (int, float)) and math.isfinite(float(value)):
         return float(value)
     return None
+
+
+def _generation_region_values(row: Mapping[str, Any], region: str) -> dict[str, float]:
+    metrics = row.get("metrics", {})
+    if region == "future":
+        metric_values = metrics.get("future", {})
+        rmsf = row.get("corrected_metrics", {}).get("rmsf", {})
+    else:
+        horizon = metrics.get("horizons", {}).get(region, {})
+        if horizon.get("available") is not True:
+            return {}
+        metric_values = horizon.get("metrics", {})
+        rmsf = horizon.get("temporal", {}).get("rmsf", {})
+    values: dict[str, float] = {}
+    for key in (
+        "aligned_rmsd",
+        "drmsd",
+        "bond_rmse",
+        "contact_f1",
+        "contact_occupancy_mae",
+    ):
+        number = _finite_number(metric_values.get(key))
+        if number is not None:
+            values[key] = number
+    for source_key, output_key in (
+        ("prediction", "rmsf_prediction"),
+        ("target", "rmsf_target"),
+        ("correlation", "rmsf_atom_correlation"),
+    ):
+        number = _finite_number(rmsf.get(source_key))
+        if number is not None:
+            values[output_key] = number
+    if values.get("rmsf_target") not in (None, 0.0) and "rmsf_prediction" in values:
+        values["rmsf_ratio"] = values["rmsf_prediction"] / values["rmsf_target"]
+    if region == "future":
+        occupancy = _finite_number(
+            row.get("true_future_contact_occupancy_mae", {}).get("value")
+        )
+        if occupancy is not None:
+            values["true_future_contact_occupancy_mae"] = occupancy
+        dynamic = row.get("corrected_metrics", {}).get("velocity_lag1_acf", {})
+        for source_key, output_key in (
+            ("prediction", "velocity_lag1_acf_prediction"),
+            ("target", "velocity_lag1_acf_target"),
+            ("dynamic_correlation", "velocity_atom_correlation"),
+        ):
+            number = _finite_number(dynamic.get(source_key))
+            if number is not None:
+                values[output_key] = number
+        block = row.get("block_displacements", {})
+        for key in (
+            "prediction_within_block_rms",
+            "target_within_block_rms",
+            "prediction_between_block_centroid_rms",
+            "target_between_block_centroid_rms",
+        ):
+            number = _finite_number(block.get(key))
+            if number is not None:
+                values[key] = number
+        if (
+            values.get("target_within_block_rms") not in (None, 0.0)
+            and "prediction_within_block_rms" in values
+        ):
+            values["within_block_displacement_ratio"] = (
+                values["prediction_within_block_rms"] / values["target_within_block_rms"]
+            )
+        if (
+            values.get("target_between_block_centroid_rms") not in (None, 0.0)
+            and "prediction_between_block_centroid_rms" in values
+        ):
+            values["between_block_displacement_ratio"] = (
+                values["prediction_between_block_centroid_rms"]
+                / values["target_between_block_centroid_rms"]
+            )
+    return values
+
+
+def _aggregate_generation_region(
+    rows: Sequence[Mapping[str, Any]], region: str
+) -> dict[str, Any]:
+    by_sample: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if _generation_region_values(row, region):
+            by_sample.setdefault(str(row["sample_id"]), []).append(row)
+    sample_rows = []
+    for sample_id, sample_group in by_sample.items():
+        per_draw = [_generation_region_values(row, region) for row in sample_group]
+        keys = sorted({key for values in per_draw for key in values})
+        values: dict[str, Any] = {
+            "sample_id": sample_id,
+            "system": str(sample_group[0]["system"]),
+        }
+        for key in keys:
+            numbers = [row[key] for row in per_draw if key in row]
+            if numbers:
+                values[key] = sum(numbers) / len(numbers)
+        sample_rows.append(values)
+    by_system: dict[str, list[Mapping[str, Any]]] = {}
+    for row in sample_rows:
+        by_system.setdefault(str(row["system"]), []).append(row)
+    keys = sorted(
+        {key for row in sample_rows for key in row if key not in ("sample_id", "system")}
+    )
+    system_rows = {}
+    for system, system_samples in sorted(by_system.items()):
+        values: dict[str, Any] = {"sample_count": len(system_samples)}
+        for key in keys:
+            numbers = [row[key] for row in system_samples if key in row]
+            if numbers:
+                values[key] = sum(numbers) / len(numbers)
+        system_rows[system] = values
+    system_equal = {}
+    for key in keys:
+        numbers = [row[key] for row in system_rows.values() if key in row]
+        if numbers:
+            system_equal[key] = sum(numbers) / len(numbers)
+    return {
+        "row_count": sum(len(group) for group in by_sample.values()),
+        "sample_count": len(sample_rows),
+        "system_count": len(system_rows),
+        "system_equal": system_equal,
+        "system_rows": system_rows,
+        "aggregation": "draw_to_clip_sample_to_system; no best_of_n",
+    }
 
 
 def _aggregate_generation_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2007,66 +2117,17 @@ def _aggregate_generation_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, A
         groups.setdefault((int(row["history_frames"]), int(row["steps"])), []).append(row)
     output: dict[str, Any] = {}
     for (history, steps), group in sorted(groups.items()):
-        by_sample: dict[str, list[Mapping[str, Any]]] = {}
-        for row in group:
-            by_sample.setdefault(str(row["sample_id"]), []).append(row)
-        sample_rows = []
-        for sample_id, sample_group in by_sample.items():
-            values = {}
-            for key in ("aligned_rmsd", "drmsd", "bond_rmse", "contact_f1", "contact_occupancy_mae"):
-                numbers = [_numeric_future(row, key) for row in sample_group]
-                numbers = [value for value in numbers if value is not None]
-                if numbers:
-                    values[key] = sum(numbers) / len(numbers)
-            occ = [row.get("true_future_contact_occupancy_mae", {}).get("value") for row in sample_group]
-            occ = [float(value) for value in occ if isinstance(value, (int, float)) and math.isfinite(float(value))]
-            if occ:
-                values["true_future_contact_occupancy_mae"] = sum(occ) / len(occ)
-            rmsf = [row.get("corrected_metrics", {}).get("rmsf", {}) for row in sample_group]
-            rmsf_pred = [item.get("prediction") for item in rmsf if isinstance(item.get("prediction"), (int, float))]
-            rmsf_target = [item.get("target") for item in rmsf if isinstance(item.get("target"), (int, float))]
-            if rmsf_pred:
-                values["rmsf_prediction"] = sum(rmsf_pred) / len(rmsf_pred)
-            if rmsf_target:
-                values["rmsf_target"] = sum(rmsf_target) / len(rmsf_target)
-            if values.get("rmsf_target") not in (None, 0.0) and values.get("rmsf_prediction") is not None:
-                values["rmsf_ratio"] = values["rmsf_prediction"] / values["rmsf_target"]
-            acf = [row.get("corrected_metrics", {}).get("velocity_lag1_acf", {}).get("prediction") for row in sample_group]
-            acf = [float(value) for value in acf if isinstance(value, (int, float)) and math.isfinite(float(value))]
-            if acf:
-                values["velocity_lag1_acf_prediction"] = sum(acf) / len(acf)
-            values["sample_id"] = sample_id
-            values["system"] = str(sample_group[0]["system"])
-            sample_rows.append(values)
-        by_system: dict[str, list[Mapping[str, Any]]] = {}
-        for row in sample_rows:
-            by_system.setdefault(str(row["system"]), []).append(row)
-        keys = sorted({key for row in sample_rows for key in row if key not in ("sample_id", "system")})
-        system_equal = {}
-        for key in keys:
-            system_values = []
-            for system_rows in by_system.values():
-                values = [row[key] for row in system_rows if isinstance(row.get(key), (int, float))]
-                if values:
-                    system_values.append(sum(values) / len(values))
-            if system_values:
-                system_equal[key] = sum(system_values) / len(system_values)
-        system_rows = {}
-        for system, system_samples in sorted(by_system.items()):
-            values = {"sample_count": len(system_samples)}
-            for key in keys:
-                numbers = [row[key] for row in system_samples if isinstance(row.get(key), (int, float))]
-                if numbers:
-                    values[key] = sum(numbers) / len(numbers)
-            system_rows[system] = values
-        output[f"H{history}_L{steps}"] = {
-            "row_count": len(group),
-            "sample_count": len(sample_rows),
-            "system_count": len(by_system),
-            "system_equal": system_equal,
-            "system_rows": system_rows,
-            "aggregation": "draw_to_clip_sample_to_system; no best_of_n",
+        regions = {
+            region: _aggregate_generation_region(group, region)
+            for region in ("L4", "L8", "future")
         }
+        value = dict(regions["future"])
+        value.update({
+            "sampling_steps": steps,
+            "regions": regions,
+            "region_contract": "L4/L8 are forecast horizons; future is every unobserved frame",
+        })
+        output[f"H{history}_L{steps}"] = value
     return output
 
 
@@ -2111,6 +2172,27 @@ def _evaluate(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) -> dict
         "selection": "compare equal effective token budget and fixed final protocol; no cross-source RF-loss ranking",
     }
     _write_json(ctx.output_dir / "comparison.json", comparison)
+    _write_json(
+        ctx.output_dir / "per_system_results.json",
+        {
+            "schema": "pvb.dit.capacity_data.per_system_results.v1",
+            "experiments": {
+                experiment_id: {
+                    "status": value.get("status", "PASS"),
+                    "source_mode": value.get("source_mode"),
+                    "data_scale": value.get("data_scale"),
+                    "depth": value.get("depth"),
+                    "final_aggregate": value.get("final_aggregate", {}),
+                    "subset_aggregate": value.get("subset_aggregate", {}),
+                    "train_subset_aggregate": value.get("train_subset_aggregate", {}),
+                    "reason": value.get("reason"),
+                }
+                for experiment_id, value in evaluations.items()
+            },
+            "aggregation": "draw_to_clip_sample_to_system; H4/H8 and L4/L8/future retained",
+            "test_payload_opened": False,
+        },
+    )
     _write_report(ctx, comparison)
     return comparison
 

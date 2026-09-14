@@ -165,3 +165,19 @@ def test_dynamic_correlation_uses_ordered_aligned_motion():
     assert reordered["dynamic_correlation"] < same["dynamic_correlation"] - 0.5
     assert reordered["signal"].endswith("velocity")
     assert reordered["units"] == "angstrom_per_ps"
+
+
+def test_constant_rmsf_and_velocity_correlations_are_null():
+    batch = _rigid_metric_batch(atoms=2)
+    coordinates = torch.zeros(4, 2, 3)
+    rmsf = aligned_rmsf_metrics(
+        coordinates, coordinates, batch, _mask(batch, 4, coordinates.device)
+    )
+    dynamic = dynamic_acf_metrics(
+        coordinates, coordinates, batch, _mask(batch, 4, coordinates.device)
+    )
+    assert rmsf["correlation"] is None
+    assert rmsf["correlation_reason"] == "constant_rmsf_series"
+    assert dynamic["prediction"] is None
+    assert dynamic["target"] is None
+    assert dynamic["dynamic_correlation"] is None

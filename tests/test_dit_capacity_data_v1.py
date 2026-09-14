@@ -184,6 +184,83 @@ def test_resume_history_is_atomically_truncated_to_checkpoint(tmp_path) -> None:
     assert not (tmp_path / "train_history.jsonl.tmp").exists()
 
 
+def test_generation_aggregation_is_draw_clip_system_and_retains_regions() -> None:
+    from scripts.run_dit_capacity_data_v1 import _aggregate_generation_rows
+
+    def row(sample_id: str, system: str, draw: int, value: float) -> dict:
+        region = {
+            "aligned_rmsd": value,
+            "drmsd": value + 0.1,
+            "bond_rmse": value + 0.2,
+            "contact_f1": value + 0.3,
+        }
+        rmsf = {
+            "prediction": value,
+            "target": 2.0,
+            "correlation": value / 10.0,
+        }
+        return {
+            "sample_id": sample_id,
+            "system": system,
+            "draw": draw,
+            "history_frames": 4,
+            "steps": 16,
+            "metrics": {
+                "future": region,
+                "horizons": {
+                    "L4": {
+                        "available": True,
+                        "metrics": region,
+                        "temporal": {"rmsf": rmsf},
+                    },
+                    "L8": {
+                        "available": True,
+                        "metrics": region,
+                        "temporal": {"rmsf": rmsf},
+                    },
+                },
+            },
+            "corrected_metrics": {
+                "rmsf": rmsf,
+                "velocity_lag1_acf": {
+                    "prediction": value / 20.0,
+                    "target": 0.5,
+                    "dynamic_correlation": value / 30.0,
+                },
+            },
+            "true_future_contact_occupancy_mae": {"value": value + 0.4},
+            "block_displacements": {
+                "prediction_within_block_rms": value,
+                "target_within_block_rms": 2.0,
+                "prediction_between_block_centroid_rms": value * 2.0,
+                "target_between_block_centroid_rms": 4.0,
+            },
+        }
+
+    aggregate = _aggregate_generation_rows(
+        [
+            row("sample-a", "system-a", 0, 1.0),
+            row("sample-a", "system-a", 1, 3.0),
+            row("sample-b", "system-a", 0, 5.0),
+            row("sample-c", "system-b", 0, 9.0),
+        ]
+    )["H4_L16"]
+
+    # sample-a averages its draws to 2; system-a then averages samples a/b to 3.5.
+    assert aggregate["system_rows"]["system-a"]["aligned_rmsd"] == 3.5
+    assert aggregate["system_rows"]["system-b"]["aligned_rmsd"] == 9.0
+    assert aggregate["system_equal"]["aligned_rmsd"] == 6.25
+    assert aggregate["regions"]["L4"]["system_equal"]["aligned_rmsd"] == 6.25
+    assert aggregate["regions"]["L8"]["system_equal"]["rmsf_ratio"] == 3.125
+    assert aggregate["regions"]["future"]["system_equal"][
+        "within_block_displacement_ratio"
+    ] == 3.125
+    assert aggregate["regions"]["future"]["system_equal"][
+        "between_block_displacement_ratio"
+    ] == 3.125
+    assert aggregate["sampling_steps"] == 16
+
+
 def test_cuda_legacy_both_path_builds_independent_trainable_models(tmp_path) -> None:
     from scripts.run_dit_source_ab import ExperimentContext, _make_trainer, _shared_initialization
 
