@@ -655,7 +655,7 @@ def _isolation_check(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) 
     _atomic_torch_save(resume_path, payload)
     continuous_row = continuous.train_step(observed, generator=gen_cont)
     loaded = resumed.load_checkpoint(resume_path, map_location=ctx.device)
-    gen_resume.set_state(loaded["capacity"]["generator_state"])
+    gen_resume.set_state(loaded["capacity"]["generator_state"].detach().to(device="cpu"))
     resumed_row = resumed.train_step(observed, generator=gen_resume)
     resume_match = (
         _recursive_hash(continuous.model.state_dict()) == _recursive_hash(resumed.model.state_dict())
@@ -1145,7 +1145,7 @@ def _restore_checkpoint(
         raise RuntimeError(f"{spec.experiment_id} successful update count mismatch")
     return (
         {"epoch": int(cursor["epoch"]), "batch_index": int(cursor["batch_index"])},
-        capacity["generator_state"],
+        capacity["generator_state"].detach().to(device="cpu"),
         int(capacity.get("tokens_seen", 0)),
         str(capacity.get("schedule_hash", "")),
     )

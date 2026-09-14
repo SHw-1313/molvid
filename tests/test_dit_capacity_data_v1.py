@@ -160,7 +160,7 @@ def test_cuda_capacity_parameter_isolation_and_resume(tmp_path) -> None:
     torch.save(payload, checkpoint)
     continuous_row = continuous.train_step(batch, generator=generator_cont)
     loaded = resumed.load_checkpoint(checkpoint, map_location=device)
-    generator_resume.set_state(loaded["explicit_generator_state"])
+    generator_resume.set_state(loaded["explicit_generator_state"].detach().to(device="cpu"))
     resumed_row = resumed.train_step(batch, generator=generator_resume)
     assert continuous_row["tau_mean"] == resumed_row["tau_mean"]
     assert continuous_row["tau_min"] == resumed_row["tau_min"]
