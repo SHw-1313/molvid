@@ -22,6 +22,11 @@ from evaluation.dit_reassessment_interpretation import (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--config-path", default="config/dit_source_reassessment_v2_neibu.yaml")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--host", default="neibu")
+    parser.add_argument("--gpu-uuid", required=True)
+    parser.add_argument("--gpu-pid", type=int, required=True)
     args = parser.parse_args()
     output_dir = args.output_dir.resolve()
     value = derive_interpretation(output_dir)
@@ -32,6 +37,24 @@ def main() -> None:
 
     report_path = output_dir / "report.md"
     report = report_path.read_text(encoding="utf-8")
+    report = report.replace("config/dit_source_reassessment_v2.yaml", args.config_path)
+    report = report.replace("cuda:IDLE", args.device)
+    report = report.replace(
+        "enter-container  # then: conda activate torch-ito",
+        f"ssh -tt {args.host} 'enter-container'\n"
+        "conda activate torch-ito\n"
+        "export CUDA_VISIBLE_DEVICES=0",
+    )
+    execution_line = (
+        f"- Execution device: host `{args.host}`, physical GPU0 UUID `{args.gpu_uuid}`, "
+        f"evaluation PID `{args.gpu_pid}`; container-visible device `{args.device}`."
+    )
+    if execution_line not in report:
+        report = report.replace(
+            "- Test payload opened: `false`.",
+            execution_line + "\n- Test payload opened: `false`.",
+            1,
+        )
     section = "\n".join(render_interpretation_markdown(value))
     short_rollout_marker = "\n## Short rollout\n"
     interpretation_marker = "\n## Required scientific answers\n"

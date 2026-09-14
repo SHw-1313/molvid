@@ -60,18 +60,22 @@ SAMPLE_ID_RE = re.compile(r"^(?P<system>.+)_(?P<replica>R[0-9]+)_w(?P<window>[0-
 
 
 def _git_commit() -> str:
+    override = os.environ.get("MOLVID_SOURCE_COMMIT", "").strip()
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
+            ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        return override or "unknown"
 
 
 def _code_inventory() -> dict[str, str]:
     paths = (
         "scripts/run_dit_source_reassessment.py",
+        "scripts/write_dit_reassessment_interpretation.py",
         "evaluation/dit_reassessment.py",
+        "evaluation/dit_reassessment_interpretation.py",
         "scripts/run_dit_source_ab.py",
         "scripts/run_state_detail_dit_pilot.py",
         "module/latent_rectified_flow.py",
