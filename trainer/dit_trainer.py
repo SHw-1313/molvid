@@ -383,6 +383,13 @@ class DiTTrainer:
         self._validate_checkpoint(payload)
         self.model.load_state_dict(payload["model_state"])
         self.optimizer.load_state_dict(payload["optimizer_state"])
+        # AdamW keeps its scalar step counters on CPU for the live CUDA optimizer.
+        # A CUDA map_location otherwise leaves restored counters on the GPU, which
+        # changes the serialized optimizer state despite identical updates.
+        for state in self.optimizer.state.values():
+            step = state.get("step")
+            if isinstance(step, Tensor) and step.ndim == 0:
+                state["step"] = step.detach().to(device="cpu")
         if self.scheduler is not None and payload.get("scheduler_state") is not None:
             self.scheduler.load_state_dict(payload["scheduler_state"])
         if payload.get("scaler_state"):
