@@ -731,15 +731,21 @@ def _isolation_check(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) 
     loaded = resumed.load_checkpoint(resume_path, map_location=ctx.device)
     gen_resume.set_state(loaded["capacity"]["generator_state"].detach().to(device="cpu"))
     resumed_row = resumed.train_step(observed, generator=gen_resume)
-    resume_match = (
-        _recursive_hash(continuous.model.state_dict()) == _recursive_hash(resumed.model.state_dict())
-        and _optimizer_hash(continuous.optimizer) == _optimizer_hash(resumed.optimizer)
-        and continuous_row["tau_mean"] == resumed_row["tau_mean"]
-        and continuous_row["tau_min"] == resumed_row["tau_min"]
-        and continuous_row["tau_max"] == resumed_row["tau_max"]
-    )
+    resume_components = {
+        "model_state": _recursive_hash(continuous.model.state_dict())
+        == _recursive_hash(resumed.model.state_dict()),
+        "optimizer_state": _optimizer_hash(continuous.optimizer)
+        == _optimizer_hash(resumed.optimizer),
+        "tau_mean": continuous_row["tau_mean"] == resumed_row["tau_mean"],
+        "tau_min": continuous_row["tau_min"] == resumed_row["tau_min"],
+        "tau_max": continuous_row["tau_max"] == resumed_row["tau_max"],
+    }
+    resume_match = all(resume_components.values())
     if not resume_match:
-        raise RuntimeError("continuous and save/resume next updates differ")
+        raise RuntimeError(
+            "continuous and save/resume next updates differ: "
+            + json.dumps(resume_components, sort_keys=True)
+        )
     return {
         "schema": "pvb.dit.capacity_data.isolation_verification.v1",
         "status": "PASS",
@@ -767,6 +773,7 @@ def _isolation_check(ctx: CapacityContext, specs: Mapping[str, ExperimentSpec]) 
             "restored_updates": resumed.successful_updates,
             "batch_cursor": {"epoch": 0, "batch_index": 1},
             "next_update_match": resume_match,
+            "next_update_components": resume_components,
         },
         "test_payload_opened": False,
     }
