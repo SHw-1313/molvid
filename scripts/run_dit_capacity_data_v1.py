@@ -917,42 +917,67 @@ def _dataset_sampler(dataset: Any, cfg: Mapping[str, Any]) -> Any:
     )
 
 
-def _next_batch(dataset: Any, sampler: Any, cursor: dict[str, int]) -> tuple[tuple[int, ...], str, int]:
+def _next_batch(
+    sampler: Any,
+    cursor: dict[str, int],
+    plan_cache: dict[str, Any],
+) -> tuple[tuple[int, ...], str, int]:
     epoch = int(cursor["epoch"])
-    sampler.set_epoch(epoch)
-    batches = tuple(tuple(int(value) for value in batch) for batch in sampler.global_batches)
-    if not batches:
-        raise RuntimeError("capacity sampler produced no batches")
+    if plan_cache.get("epoch") != epoch:
+        sampler.set_epoch(epoch)
+        batches = tuple(tuple(int(value) for value in batch) for batch in sampler.global_batches)
+        if not batches:
+            raise RuntimeError("capacity sampler produced no batches")
+        plan_cache.clear()
+        plan_cache.update({
+            "epoch": epoch,
+            "batches": batches,
+            "schedule_hash": _canonical_hash({
+                "schema": "pvb.dit.capacity_data.schedule.v1",
+                "epoch": epoch,
+                "batches": [list(value) for value in batches],
+                "selected_sample_ids": list(sampler.selected_sample_ids),
+            }),
+        })
+    batches = plan_cache["batches"]
     if int(cursor["batch_index"]) >= len(batches):
         epoch += 1
         cursor["epoch"] = epoch
         cursor["batch_index"] = 0
         sampler.set_epoch(epoch)
         batches = tuple(tuple(int(value) for value in batch) for batch in sampler.global_batches)
+        if not batches:
+            raise RuntimeError("capacity sampler produced no batches")
+        plan_cache.clear()
+        plan_cache.update({
+            "epoch": epoch,
+            "batches": batches,
+            "schedule_hash": _canonical_hash({
+                "schema": "pvb.dit.capacity_data.schedule.v1",
+                "epoch": epoch,
+                "batches": [list(value) for value in batches],
+                "selected_sample_ids": list(sampler.selected_sample_ids),
+            }),
+        })
     batch = batches[int(cursor["batch_index"])]
     cursor["batch_index"] += 1
-    schedule_hash = _canonical_hash({
-        "schema": "pvb.dit.capacity_data.schedule.v1",
-        "epoch": epoch,
-        "batches": [list(value) for value in batches],
-        "selected_sample_ids": list(sampler.selected_sample_ids),
-    })
-    return batch, schedule_hash, epoch
+    return batch, str(plan_cache["schedule_hash"]), epoch
 
 
-def _batch_tokens(dataset: Any, indices: Sequence[int]) -> int:
-    specs = dataset.clip_spec_table()
+def _batch_tokens(specs: Sequence[Any], indices: Sequence[int]) -> int:
     return int(sum(specs[int(index)].effective_tokens for index in indices))
 
 
 def _estimate_tokens(dataset: Any, cfg: Mapping[str, Any], steps: int) -> tuple[int, float]:
     sampler = _dataset_sampler(dataset, cfg)
     cursor = {"epoch": 0, "batch_index": 0}
+    plan_cache: dict[str, Any] = {}
+    specs = dataset.clip_spec_table()
     total = 0
     values = []
     for _step in range(int(steps)):
-        indices, _schedule_hash, _epoch = _next_batch(dataset, sampler, cursor)
-        amount = _batch_tokens(dataset, indices)
+        indices, _schedule_hash, _epoch = _next_batch(sampler, cursor, plan_cache)
+        amount = _batch_tokens(specs, indices)
         values.append(amount)
         total += amount
     return total, (sum(values) / max(len(values), 1))
@@ -970,13 +995,15 @@ def _profile_one(
     dataset = ctx.data.train_for_scale(spec.data_scale)
     sampler = _dataset_sampler(dataset, ctx.cfg)
     cursor = {"epoch": 0, "batch_index": 0}
+    plan_cache: dict[str, Any] = {}
+    specs = dataset.clip_spec_table()
     trainer = _make_trainer(ctx, spec, 20000, init_state, init_hash)
     generator = torch.Generator(device=ctx.device).manual_seed(int(ctx.cfg["seed"]["training"]))
     timings = []
     tokens = []
     cache = LatentFieldCache(mode="disabled")
     for update in range(total_updates):
-        indices, _schedule_hash, _epoch = _next_batch(dataset, sampler, cursor)
+        indices, _schedule_hash, _epoch = _next_batch(sampler, cursor, plan_cache)
         history = HISTORY_SCHEDULE[update % len(HISTORY_SCHEDULE)]
         started = time.perf_counter()
         _batch_cpu, batch, target_batch = _prepare_encoded(ctx, dataset, indices)
@@ -987,7 +1014,7 @@ def _profile_one(
         trainer.train_step(observed, generator=generator, source_center=center)
         _sync(ctx.device)
         timings.append(time.perf_counter() - started)
-        tokens.append(_batch_tokens(dataset, indices))
+        tokens.append(_batch_tokens(specs, indices))
     measured = timings[warmup:]
     ordered = sorted(measured)
     p90 = ordered[max(0, int(math.ceil(0.9 * len(ordered))) - 1)]
@@ -1636,6 +1663,8 @@ def _train_one(
     dataset = ctx.data.train_for_scale(spec.data_scale)
     sampler = _dataset_sampler(dataset, ctx.cfg)
     cursor = {"epoch": 0, "batch_index": 0}
+    plan_cache: dict[str, Any] = {}
+    specs = dataset.clip_spec_table()
     generator = torch.Generator(device=ctx.device).manual_seed(int(ctx.cfg["seed"]["training"]))
     tokens_seen = 0
     schedule_hash = ""
@@ -1658,7 +1687,7 @@ def _train_one(
     )
     while trainer.successful_updates < target_step_cap and tokens_seen < target_tokens:
         update_index = trainer.successful_updates
-        indices, schedule_hash, epoch = _next_batch(dataset, sampler, cursor)
+        indices, schedule_hash, epoch = _next_batch(sampler, cursor, plan_cache)
         history = HISTORY_SCHEDULE[update_index % len(HISTORY_SCHEDULE)]
         _batch_cpu, batch, target_batch = _prepare_encoded(ctx, dataset, indices)
         observed = _observed(ctx, target_batch, batch, history)
@@ -1666,14 +1695,15 @@ def _train_one(
         if spec.source_mode == "conditional":
             center, _ = _center(ctx, batch, observed, history, center_cache)
         row = trainer.train_step(observed, generator=generator, source_center=center)
-        tokens_seen += _batch_tokens(dataset, indices)
+        batch_tokens = _batch_tokens(specs, indices)
+        tokens_seen += batch_tokens
         row.update({
             "schema": "pvb.dit.capacity_data.train_row.v1",
             "experiment_id": spec.experiment_id,
             "source_mode": spec.source_mode,
             "data_scale": spec.data_scale,
             "history_frames": history,
-            "batch_tokens": _batch_tokens(dataset, indices),
+            "batch_tokens": batch_tokens,
             "tokens_seen": tokens_seen,
             "successful_optimizer_updates": trainer.successful_updates,
             "epoch": epoch,

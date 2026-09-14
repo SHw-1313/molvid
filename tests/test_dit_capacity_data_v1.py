@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import io
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -134,6 +135,100 @@ def test_git_commit_override_requires_full_sha(monkeypatch) -> None:
     monkeypatch.setenv("DIT_CODE_COMMIT", "not-a-full-sha")
     with pytest.raises(ValueError, match="40-character hexadecimal"):
         _git_commit()
+
+
+def test_batch_plan_is_built_once_per_epoch() -> None:
+    from scripts.run_dit_capacity_data_v1 import _next_batch
+
+    class Sampler:
+        selected_sample_ids = ("sample0", "sample1")
+
+        def __init__(self) -> None:
+            self.calls = []
+            self.global_batches = ()
+
+        def set_epoch(self, epoch: int) -> None:
+            self.calls.append(epoch)
+            self.global_batches = ((epoch * 2,), (epoch * 2 + 1,))
+
+    sampler = Sampler()
+    cursor = {"epoch": 0, "batch_index": 0}
+    cache = {}
+    first, first_hash, first_epoch = _next_batch(sampler, cursor, cache)
+    second, second_hash, second_epoch = _next_batch(sampler, cursor, cache)
+    third, third_hash, third_epoch = _next_batch(sampler, cursor, cache)
+
+    assert (first, second, third) == ((0,), (1,), (2,))
+    assert (first_epoch, second_epoch, third_epoch) == (0, 0, 1)
+    assert first_hash == second_hash
+    assert third_hash != first_hash
+    assert sampler.calls == [0, 1]
+
+
+def test_cuda_legacy_both_path_builds_independent_trainable_models(tmp_path) -> None:
+    from scripts.run_dit_source_ab import ExperimentContext, _make_trainer, _shared_initialization
+
+    cfg = {
+        "seed": {"init": 20260914, "training": 20260914},
+        "candidate": {"ratio": 2, "mode": "ratio2_state_detail"},
+        "model": {
+            "codec_width": 4,
+            "scalar_width": 8,
+            "vector_width": 4,
+            "depth": 1,
+            "heads": 2,
+            "ffn_multiplier": 2,
+            "dropout": 0.0,
+            "execution_backend": "factorized_v2",
+        },
+        "protocol": {"learning_rate": 2e-4, "weight_decay": 0.01, "grad_clip": 1.0},
+        "source": {"sigma": 1.0},
+        "schedule": {"observation_history": [4, 8]},
+    }
+    device = _require_cuda()
+    statistics = LatentStatistics.fit(
+        [make_batch(2, width=4)], ratio=2, provenance={"split": "legacy-both-test"}
+    )
+    codec_model = torch.nn.Identity().to(device)
+    codec_model.frame_encoder = torch.nn.Identity().to(device)
+    context = ExperimentContext(
+        cfg=cfg,
+        output_dir=tmp_path,
+        data=SimpleNamespace(data_hash="legacy-both-data"),
+        codec=SimpleNamespace(model=codec_model, codec_state_hash="legacy-both-codec"),
+        statistics=statistics,
+        adapter=StateDetailLatentAdapter(
+            codec_width=4, scalar_width=8, vector_width=4, ratio=2
+        ).to(device),
+        device=device,
+        statistics_path=tmp_path / "statistics.pt",
+        statistics_file_sha256="legacy-both-statistics-file",
+    )
+    init_state, init_hash = _shared_initialization(cfg, device)
+    gaussian = _make_trainer(
+        context,
+        source_mode="gaussian",
+        center_kind="repeat_last_coordinate_encode",
+        target_steps=2,
+        init_state=init_state,
+        init_hash=init_hash,
+    )
+    conditional = _make_trainer(
+        context,
+        source_mode="conditional",
+        center_kind="repeat_last_coordinate_encode",
+        target_steps=2,
+        init_state=init_state,
+        init_hash=init_hash,
+    )
+
+    gaussian_storage = {parameter.data_ptr() for parameter in gaussian.model.parameters()}
+    conditional_storage = {parameter.data_ptr() for parameter in conditional.model.parameters()}
+    context_storage = {parameter.data_ptr() for parameter in context.adapter.parameters()}
+    assert module_state_hash(gaussian.model) == module_state_hash(conditional.model) == init_hash
+    assert gaussian_storage.isdisjoint(conditional_storage)
+    assert gaussian_storage.isdisjoint(context_storage)
+    assert conditional_storage.isdisjoint(context_storage)
 
 
 def test_cuda_capacity_parameter_isolation_and_resume(tmp_path) -> None:
