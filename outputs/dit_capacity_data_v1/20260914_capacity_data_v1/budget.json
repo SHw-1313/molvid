@@ -1,0 +1,85 @@
+{
+  "blocked_experiments": {
+    "C192": {
+      "reason": "expanded192 source is incomplete on this machine: 26784 selected clips are missing",
+      "status": "BLOCKED_DATA"
+    }
+  },
+  "budget_frozen_before_results": true,
+  "candidate_records": [
+    {
+      "estimated_training_gpu_seconds": 230720.112179406,
+      "estimated_training_wall_seconds": 230720.112179406,
+      "fits_reserved_budget": false,
+      "fits_reserved_gpu_budget": false,
+      "fits_reserved_wall_budget": false,
+      "steps": 20000,
+      "target_tokens": 1190605600
+    },
+    {
+      "estimated_training_gpu_seconds": 115360.056089703,
+      "estimated_training_wall_seconds": 115360.056089703,
+      "fits_reserved_budget": false,
+      "fits_reserved_gpu_budget": false,
+      "fits_reserved_wall_budget": false,
+      "steps": 10000,
+      "target_tokens": 595031168
+    },
+    {
+      "estimated_training_gpu_seconds": 51912.02524036635,
+      "estimated_training_wall_seconds": 51912.02524036635,
+      "fits_reserved_budget": true,
+      "fits_reserved_gpu_budget": true,
+      "fits_reserved_wall_budget": true,
+      "steps": 4500,
+      "target_tokens": 267988032
+    }
+  ],
+  "estimated_training_gpu_seconds_at_config_target": 230720.112179406,
+  "estimated_training_wall_seconds_at_config_target": 230720.112179406,
+  "evaluation_reserve_included": true,
+  "gpu_hours_total": 32.0,
+  "mean_base_batch_tokens": 59530.28,
+  "per_experiment_target_step_cap": {
+    "C192": 4500,
+    "C48": 4500,
+    "C48D8": 4500,
+    "G48": 4500
+  },
+  "profile_p90_seconds": {
+    "C192": 3.868658720748499,
+    "C48": 2.998002093285322,
+    "C48D8": 3.0949269765987992,
+    "G48": 1.574417818337679
+  },
+  "reserved_fraction": 0.25,
+  "reserved_gpu_seconds": 28800.0,
+  "reserved_wall_seconds": 32400.0,
+  "schema": "pvb.dit.capacity_data.budget.v1",
+  "selected_base_steps": 4500,
+  "selected_target_tokens": 267988032,
+  "status": "PARTIAL_BUDGET",
+  "test_payload_opened": false,
+  "token_estimates_at_cap": {
+    "C192": {
+      "reason": "expanded192 source is incomplete on this machine: 26784 selected clips are missing",
+      "status": "BLOCKED_DATA",
+      "target_tokens_reserved": 1190605600
+    },
+    "C48": [
+      1190605600,
+      59530.28
+    ],
+    "C48D8": [
+      1190605600,
+      59530.28
+    ],
+    "G48": [
+      1190605600,
+      59530.28
+    ]
+  },
+  "usable_training_gpu_seconds": 86400.0,
+  "usable_training_wall_seconds": 97200.0,
+  "wall_hours_total": 36.0
+}

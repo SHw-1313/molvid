@@ -1,0 +1,374 @@
+{
+  "block_displacements": {
+    "available": true,
+    "prediction_between_block_centroid_rms": 1.6020195484161377,
+    "prediction_within_block_rms": 2.982377290725708,
+    "reference": "displacement from last observed frame, future-only; block IDs from frozen topology",
+    "target_between_block_centroid_rms": 0.9558019638061523,
+    "target_within_block_rms": 0.4985056519508362
+  },
+  "center_cache": {
+    "cache": "miss",
+    "cache_key": "dd566b97cc306c7411768b848af37d67c958aa9bb265be4aa32f4ef75b93daa4",
+    "uses_future_coordinates": false
+  },
+  "checkpoint_step": 4500,
+  "corrected_metrics": {
+    "rmsf": {
+      "absolute_error": 1.718858003616333,
+      "aggregation": "sample_equal_mean",
+      "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+      "correlation": 0.09769756346940994,
+      "prediction": 2.3853344917297363,
+      "target": 0.6664764881134033
+    },
+    "velocity_lag1_acf": {
+      "absolute_error": 0.16908589005470276,
+      "aggregation": "sample_equal_mean",
+      "dynamic_correlation": -0.018033307045698166,
+      "dynamic_correlation_absolute_error": 1.0180333070456982,
+      "lag": 1,
+      "mean_removed": true,
+      "prediction": -0.2964933216571808,
+      "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+      "target": -0.46557921171188354,
+      "units": "angstrom_per_ps"
+    }
+  },
+  "data_scale": "base48",
+  "draw_id": 0,
+  "evaluation_contract_hash": "deb6c79647906732832580ca1f01bfd6c4a8655a81510a844c84bb2e4151039f",
+  "evaluation_row_wall_seconds": 7.03675308264792,
+  "evaluation_split": "final",
+  "experiment_id": "C48D8",
+  "generation": {
+    "adapter_hash": "0a63d96d401a721e50825d4272294e15fb8c125d901b00da589b8f44403b0970",
+    "deterministic": true,
+    "latent_contract_hash": "b03913eac1794e449dc9bdb7a398af9154427d2bc2b043427a90748c2628e0a1",
+    "observed_clamp": true,
+    "observed_clamp_exact": true,
+    "observed_clamp_max_abs": 0.0,
+    "raw_detail_h": null,
+    "raw_detail_v": null,
+    "seed": 1864528155,
+    "solver": "euler",
+    "source_center": true,
+    "source_mode": "conditional",
+    "stats_hash": "863c1894bac27c6fa121eaaa635961e44c37cc95c9f55b3fb371b4fb0bab778d",
+    "steps": 16
+  },
+  "history_frames": 8,
+  "metrics": {
+    "boundary": {
+      "available": true,
+      "frame_interval": [
+        7,
+        8
+      ],
+      "history_frames": 8,
+      "predicted_step_magnitude": 3.3564586639404297,
+      "step_difference": 3.4699389934539795,
+      "target_step_magnitude": 1.0034236907958984,
+      "valid_elements": 1621
+    },
+    "full_diagnostic": {
+      "acceleration_rmse": 0.00018076505719045004,
+      "dynamic": {
+        "absolute_error": 0.22540627419948578,
+        "aggregation": "sample_equal_mean",
+        "dynamic_correlation": 0.256682425737381,
+        "dynamic_correlation_absolute_error": 0.743317574262619,
+        "lag": 1,
+        "mean_removed": true,
+        "prediction": -0.19566629827022552,
+        "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+        "target": -0.4210725724697113,
+        "units": "angstrom_per_ps"
+      },
+      "frequency_retention": 5.9659576416015625,
+      "rmsf": {
+        "absolute_error": 1.3962299823760986,
+        "aggregation": "sample_equal_mean",
+        "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+        "correlation": 0.3322150409221649,
+        "prediction": 2.1593575477600098,
+        "target": 0.7631275653839111
+      },
+      "velocity_rmse": 0.01149607676819277
+    },
+    "future": {
+      "aligned_rmsd": 3.5897062688326717,
+      "bond_rmse": 3.5503653271168663,
+      "centroid_gauge_raw_rmsd": 3.5900602555597594,
+      "clash_rate": 3.622207441367209e-05,
+      "contact_error": 0.01090837340003279,
+      "contact_f1": 0.3533957728860907,
+      "contact_false_negative_rate": 0.6488027621349753,
+      "contact_false_positive_rate": 0.005447425803123539,
+      "contact_jaccard": 0.21463461271817433,
+      "contact_occupancy_mae": 0.01090837340003279,
+      "contact_precision": 0.3556435428378726,
+      "contact_recall": 0.35119723786502466,
+      "drmsd": 2.9097239742916137,
+      "rmsd": 3.5900602555597594,
+      "torsion_change": null
+    },
+    "horizons": {
+      "L4": {
+        "available": true,
+        "frame_interval": [
+          8,
+          12
+        ],
+        "metrics": {
+          "aligned_rmsd": 3.5937202784097044,
+          "bond_rmse": 3.5906925629981488,
+          "centroid_gauge_raw_rmsd": 3.5964672928055683,
+          "clash_rate": 3.7747216993011534e-05,
+          "contact_error": 0.010935635278013962,
+          "contact_f1": 0.3521039601081281,
+          "contact_false_negative_rate": 0.6506319700823043,
+          "contact_false_positive_rate": 0.005448002335565499,
+          "contact_jaccard": 0.21368587056167274,
+          "contact_occupancy_mae": 0.010935635278013962,
+          "contact_precision": 0.35489654095467527,
+          "contact_recall": 0.3493680299176956,
+          "drmsd": 2.933355288712381,
+          "rmsd": 3.5964672928055683,
+          "torsion_change": null
+        },
+        "temporal": {
+          "acceleration_rmse": 0.00018634346242569556,
+          "dynamic": {
+            "absolute_error": 0.022463083267211914,
+            "aggregation": "sample_equal_mean",
+            "dynamic_correlation": -0.00344881066121161,
+            "dynamic_correlation_absolute_error": 1.0034488106612116,
+            "lag": 1,
+            "mean_removed": true,
+            "prediction": -0.5803487300872803,
+            "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+            "target": -0.5578856468200684,
+            "units": "angstrom_per_ps"
+          },
+          "frequency_retention": 2.763763904571533,
+          "rmsf": {
+            "absolute_error": 0.4714187979698181,
+            "aggregation": "sample_equal_mean",
+            "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+            "correlation": 0.3958997428417206,
+            "prediction": 1.0133130550384521,
+            "target": 0.541894257068634
+          },
+          "velocity_rmse": 0.011182558446804332
+        }
+      },
+      "L8": {
+        "available": true,
+        "frame_interval": [
+          8,
+          16
+        ],
+        "metrics": {
+          "aligned_rmsd": 3.5897062688326717,
+          "bond_rmse": 3.5503653271168663,
+          "centroid_gauge_raw_rmsd": 3.5900602555597594,
+          "clash_rate": 3.622207441367209e-05,
+          "contact_error": 0.01090837340003279,
+          "contact_f1": 0.3533957728860907,
+          "contact_false_negative_rate": 0.6488027621349753,
+          "contact_false_positive_rate": 0.005447425803123539,
+          "contact_jaccard": 0.21463461271817433,
+          "contact_occupancy_mae": 0.01090837340003279,
+          "contact_precision": 0.3556435428378726,
+          "contact_recall": 0.35119723786502466,
+          "drmsd": 2.9097239742916137,
+          "rmsd": 3.5900602555597594,
+          "torsion_change": null
+        },
+        "temporal": {
+          "acceleration_rmse": 0.00024318084405262923,
+          "dynamic": {
+            "absolute_error": 0.16908589005470276,
+            "aggregation": "sample_equal_mean",
+            "dynamic_correlation": -0.018033307045698166,
+            "dynamic_correlation_absolute_error": 1.0180333070456982,
+            "lag": 1,
+            "mean_removed": true,
+            "prediction": -0.2964933216571808,
+            "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+            "target": -0.46557921171188354,
+            "units": "angstrom_per_ps"
+          },
+          "frequency_retention": 9.16024398803711,
+          "rmsf": {
+            "absolute_error": 1.718858003616333,
+            "aggregation": "sample_equal_mean",
+            "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+            "correlation": 0.09769756346940994,
+            "prediction": 2.3853344917297363,
+            "target": 0.6664764881134033
+          },
+          "velocity_rmse": 0.015028669335368209
+        }
+      }
+    },
+    "observed": {
+      "aligned_rmsd": 0.021297733264751803,
+      "bond_rmse": 0.011877219672451374,
+      "centroid_gauge_raw_rmsd": 0.021396030642548754,
+      "clash_rate": 0.0,
+      "contact_error": 8.912537032306278e-05,
+      "contact_f1": 0.9947483443724026,
+      "contact_false_negative_rate": 0.004585915851228528,
+      "contact_false_positive_rate": 5.066390419918858e-05,
+      "contact_jaccard": 0.9895521334589804,
+      "contact_occupancy_mae": 8.912537032306278e-05,
+      "contact_precision": 0.9940837892004507,
+      "contact_recall": 0.9954140841487715,
+      "drmsd": 0.0189648341162664,
+      "rmsd": 0.021396030642548754,
+      "torsion_change": null
+    },
+    "protocol": {
+      "align_mask": "per-frame Kabsch alignment",
+      "boundary_semantics": "transition H-1 -> H, not an isolated future frame",
+      "contact_cutoff_angstrom": 4.5,
+      "contact_exclusion_rule": "exclude_covalent_bond_pairs_only",
+      "dynamic_correlation_semantics": "generated-vs-target aligned velocity correlation",
+      "frame_intervals": {
+        "boundary": [
+          7,
+          8
+        ],
+        "full_diagnostic": [
+          0,
+          16
+        ],
+        "future": [
+          8,
+          16
+        ],
+        "observed": [
+          0,
+          8
+        ]
+      },
+      "history_frames": 8,
+      "loss_mask": "frame validity intersected with static loss_mask",
+      "physical_time_units": "ps",
+      "time_ps_intervals": {
+        "boundary": [
+          700.0,
+          700.0
+        ],
+        "full_diagnostic": [
+          0.0,
+          1500.0
+        ],
+        "future": [
+          800.0,
+          1500.0
+        ],
+        "observed": [
+          0.0,
+          700.0
+        ]
+      }
+    },
+    "temporal": {
+      "full_diagnostic": {
+        "acceleration_rmse": 0.00018076505719045004,
+        "dynamic": {
+          "absolute_error": 0.22540627419948578,
+          "aggregation": "sample_equal_mean",
+          "dynamic_correlation": 0.256682425737381,
+          "dynamic_correlation_absolute_error": 0.743317574262619,
+          "lag": 1,
+          "mean_removed": true,
+          "prediction": -0.19566629827022552,
+          "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+          "target": -0.4210725724697113,
+          "units": "angstrom_per_ps"
+        },
+        "frequency_retention": 5.9659576416015625,
+        "rmsf": {
+          "absolute_error": 1.3962299823760986,
+          "aggregation": "sample_equal_mean",
+          "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+          "correlation": 0.3322150409221649,
+          "prediction": 2.1593575477600098,
+          "target": 0.7631275653839111
+        },
+        "velocity_rmse": 0.01149607676819277
+      },
+      "future": {
+        "acceleration_rmse": 0.00024318084405262923,
+        "dynamic": {
+          "absolute_error": 0.16908589005470276,
+          "aggregation": "sample_equal_mean",
+          "dynamic_correlation": -0.018033307045698166,
+          "dynamic_correlation_absolute_error": 1.0180333070456982,
+          "lag": 1,
+          "mean_removed": true,
+          "prediction": -0.2964933216571808,
+          "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+          "target": -0.46557921171188354,
+          "units": "angstrom_per_ps"
+        },
+        "frequency_retention": 9.16024398803711,
+        "rmsf": {
+          "absolute_error": 1.718858003616333,
+          "aggregation": "sample_equal_mean",
+          "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+          "correlation": 0.09769756346940994,
+          "prediction": 2.3853344917297363,
+          "target": 0.6664764881134033
+        },
+        "velocity_rmse": 0.015028669335368209
+      },
+      "observed": {
+        "acceleration_rmse": 9.341285261926421e-07,
+        "dynamic": {
+          "absolute_error": 0.00022280216217041016,
+          "aggregation": "sample_equal_mean",
+          "dynamic_correlation": 0.9999629855155945,
+          "dynamic_correlation_absolute_error": 3.701448440551758e-05,
+          "lag": 1,
+          "mean_removed": true,
+          "prediction": -0.40898600220680237,
+          "signal": "per-trajectory-Kabsch-aligned-frame-to-frame-velocity",
+          "target": -0.40876320004463196,
+          "units": "angstrom_per_ps"
+        },
+        "frequency_retention": 0.9999644160270691,
+        "rmsf": {
+          "absolute_error": 1.728534698486328e-05,
+          "aggregation": "sample_equal_mean",
+          "alignment": "per-frame-Kabsch-to-own-trajectory-frame0",
+          "correlation": 0.9999890327453613,
+          "prediction": 0.7312201857566833,
+          "target": 0.7312374711036682
+        },
+        "velocity_rmse": 5.471956766364251e-05
+      }
+    }
+  },
+  "prediction_coordinates": "/workspace/molvid-dit-capacity-data-v1/outputs/dit_capacity_data_v1/20260914_capacity_data_v1/C48D8/predictions/final/C48D8__atlas_3f0o_B_R3_w000000__H8__L16__draw0.npz",
+  "replica": "R3",
+  "sample_id": "atlas_3f0o_B_R3_w000000",
+  "schema": "pvb.dit.capacity_data.generation_row.v1",
+  "seed": 1864528155,
+  "source_mode": "conditional",
+  "steps": 16,
+  "system": "atlas_3f0o_B",
+  "test_payload_opened": false,
+  "true_future_contact_occupancy_mae": {
+    "cutoff_angstrom": 4.5,
+    "implementation": "bounded_chunk_vectorized",
+    "pair_chunk_size": 65536,
+    "pair_count": 1311355,
+    "value": 0.010294504539198005
+  },
+  "window": 0
+}

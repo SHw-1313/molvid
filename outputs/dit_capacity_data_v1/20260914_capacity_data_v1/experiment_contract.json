@@ -1,0 +1,168 @@
+{
+  "budget": {
+    "blocked_experiments": {
+      "C192": {
+        "reason": "expanded192 source is incomplete on this machine: 26784 selected clips are missing",
+        "status": "BLOCKED_DATA"
+      }
+    },
+    "budget_frozen_before_results": true,
+    "candidate_records": [
+      {
+        "estimated_training_gpu_seconds": 230720.112179406,
+        "estimated_training_wall_seconds": 230720.112179406,
+        "fits_reserved_budget": false,
+        "fits_reserved_gpu_budget": false,
+        "fits_reserved_wall_budget": false,
+        "steps": 20000,
+        "target_tokens": 1190605600
+      },
+      {
+        "estimated_training_gpu_seconds": 115360.056089703,
+        "estimated_training_wall_seconds": 115360.056089703,
+        "fits_reserved_budget": false,
+        "fits_reserved_gpu_budget": false,
+        "fits_reserved_wall_budget": false,
+        "steps": 10000,
+        "target_tokens": 595031168
+      },
+      {
+        "estimated_training_gpu_seconds": 51912.02524036635,
+        "estimated_training_wall_seconds": 51912.02524036635,
+        "fits_reserved_budget": true,
+        "fits_reserved_gpu_budget": true,
+        "fits_reserved_wall_budget": true,
+        "steps": 4500,
+        "target_tokens": 267988032
+      }
+    ],
+    "estimated_training_gpu_seconds_at_config_target": 230720.112179406,
+    "estimated_training_wall_seconds_at_config_target": 230720.112179406,
+    "evaluation_reserve_included": true,
+    "gpu_hours_total": 32.0,
+    "mean_base_batch_tokens": 59530.28,
+    "per_experiment_target_step_cap": {
+      "C192": 4500,
+      "C48": 4500,
+      "C48D8": 4500,
+      "G48": 4500
+    },
+    "profile_p90_seconds": {
+      "C192": 3.868658720748499,
+      "C48": 2.998002093285322,
+      "C48D8": 3.0949269765987992,
+      "G48": 1.574417818337679
+    },
+    "reserved_fraction": 0.25,
+    "reserved_gpu_seconds": 28800.0,
+    "reserved_wall_seconds": 32400.0,
+    "schema": "pvb.dit.capacity_data.budget.v1",
+    "selected_base_steps": 4500,
+    "selected_target_tokens": 267988032,
+    "status": "PARTIAL_BUDGET",
+    "test_payload_opened": false,
+    "token_estimates_at_cap": {
+      "C192": {
+        "reason": "expanded192 source is incomplete on this machine: 26784 selected clips are missing",
+        "status": "BLOCKED_DATA",
+        "target_tokens_reserved": 1190605600
+      },
+      "C48": [
+        1190605600,
+        59530.28
+      ],
+      "C48D8": [
+        1190605600,
+        59530.28
+      ],
+      "G48": [
+        1190605600,
+        59530.28
+      ]
+    },
+    "usable_training_gpu_seconds": 86400.0,
+    "usable_training_wall_seconds": 97200.0,
+    "wall_hours_total": 36.0
+  },
+  "code_commit": "c070e3c2aeecb6dc33d338e2429bfb426876faac",
+  "codec_checkpoint_sha256": "ba10c44189cca837430abbd64afce2109a0daf0bda4f05971e0441abb2a5e6df",
+  "codec_state_hash": "9a30e3838403cbd9f2cfa7344276cbdc7a8176d75ce5d4da028a3ea39ec390b9",
+  "contract_hash": "92752fb091ed8486f6ffba13fb6f31582986cba2526695aea174fd71a7814faf",
+  "data_hash": "a9bdf4d8cfd0d4ea612bb5bc9a5aad29fdba1aaec800ce272c5fc5401217e1f6",
+  "experiments": {
+    "C192": {
+      "blocked_reason": "expanded192 source is incomplete on this machine: 26784 selected clips are missing",
+      "data_scale": "expanded192",
+      "depth": 4,
+      "init_hash": "973dd528cc11fdba339c1ec062932687dcfd7248d4e834d881ad877eef7c5f6f",
+      "parameter_count": 11173120,
+      "source_mode": "conditional",
+      "status": "BLOCKED_DATA"
+    },
+    "C48": {
+      "blocked_reason": null,
+      "data_scale": "base48",
+      "depth": 4,
+      "init_hash": "973dd528cc11fdba339c1ec062932687dcfd7248d4e834d881ad877eef7c5f6f",
+      "parameter_count": 11173120,
+      "source_mode": "conditional",
+      "status": "READY"
+    },
+    "C48D8": {
+      "blocked_reason": null,
+      "data_scale": "base48",
+      "depth": 8,
+      "init_hash": "8ef5f46f8489aed211d297519a50adb2d6dfa080b0120a235b76381e9510f606",
+      "parameter_count": 21950208,
+      "source_mode": "conditional",
+      "status": "READY"
+    },
+    "G48": {
+      "blocked_reason": null,
+      "data_scale": "base48",
+      "depth": 4,
+      "init_hash": "973dd528cc11fdba339c1ec062932687dcfd7248d4e834d881ad877eef7c5f6f",
+      "parameter_count": 11173120,
+      "source_mode": "gaussian",
+      "status": "READY"
+    }
+  },
+  "model_contract": {
+    "codec_width": 128,
+    "dropout": 0.0,
+    "execution_backend": "factorized_v2",
+    "ffn_multiplier": 4,
+    "heads": 8,
+    "scalar_width": 256,
+    "vector_width": 128
+  },
+  "schedule": {
+    "checkpoint_interval": 500,
+    "clips_per_trajectory": 24,
+    "eps": "isotropic unit normal per valid coefficient, independent generator",
+    "frames": 16,
+    "histories": [
+      4,
+      8
+    ],
+    "max_atom_frame_tokens": 80000,
+    "tau": "one uniform per sample, independent generator"
+  },
+  "schema": "pvb.dit.capacity_data.experiment_contract.v1",
+  "seeds": {
+    "init": 20260914,
+    "training": 20260914,
+    "validation": 20260914
+  },
+  "source_contract": {
+    "center_kind": "repeat_last_coordinate_encode",
+    "histories": [
+      4,
+      8
+    ],
+    "sigma": 1.0
+  },
+  "statistics_file_sha256": "4d07bf53f317a6f2937a027695d2d70993674903d0fcefc1fa49e0482a529583",
+  "statistics_hash": "863c1894bac27c6fa121eaaa635961e44c37cc95c9f55b3fb371b4fb0bab778d",
+  "test_payload_opened": false
+}

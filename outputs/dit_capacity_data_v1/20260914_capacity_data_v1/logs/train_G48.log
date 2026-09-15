@@ -1,0 +1,37 @@
+Traceback (most recent call last):
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 2294, in <module>
+    main()
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 2281, in main
+    result = _train(ctx, specs, args.resume, selected)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 1895, in _train
+    results[spec.experiment_id] = _train_one(
+                                  ^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 1797, in _train_one
+    monitor_rows.append(_monitor(ctx, trainer, spec, step, monitor_indices))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 1634, in _monitor
+    rows.append(_clip_prediction_row(
+                ^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 1587, in _clip_prediction_row
+    metrics = trajectory_metric_record(decoded, batch.x.float(), batch, history)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/evaluation/dit_diagnostics.py", line 337, in trajectory_metric_record
+    result = _metrics(prediction, target, batch, history_frames=history)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/evaluation/codec_evaluation.py", line 915, in _metrics
+    future_metrics = one(future) if future else one([])
+                     ^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/evaluation/codec_evaluation.py", line 905, in one
+    "aligned_rmsd": _aligned_rmsd(prediction, target, batch, mask, frames),
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/evaluation/codec_evaluation.py", line 187, in _aligned_rmsd
+    aligned, _modes = _aligned_prediction(prediction, target, batch, frames=frames)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/evaluation/codec_evaluation.py", line 152, in _aligned_prediction
+    frame_aligned, mode = _kabsch_align(source, reference)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/evaluation/codec_evaluation.py", line 121, in _kabsch_align
+    left, _singular, right_transpose = torch.linalg.svd(covariance, full_matrices=False)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: cusolver error: CUSOLVER_STATUS_INTERNAL_ERROR, when calling `cusolverDnCreate(handle)`. If you keep seeing this error, you may use `torch.backends.cuda.preferred_linalg_library()` to try linear algebra operators with other supported backends. See https://pytorch.org/docs/stable/backends.html#torch.backends.cuda.preferred_linalg_library

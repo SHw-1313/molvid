@@ -1,0 +1,64 @@
+Traceback (most recent call last):
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 2221, in <module>
+    main()
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 2208, in main
+    result = _train(ctx, specs, args.resume, selected)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 1816, in _train
+    results[spec.experiment_id] = _train_one(
+                                  ^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 1692, in _train_one
+    _batch_cpu, batch, target_batch = _prepare_encoded(ctx, dataset, indices)
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_dit_capacity_data_v1.py", line 540, in _prepare_encoded
+    latent, batch_cpu, batch = _encode_batch(
+                               ^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/scripts/run_state_detail_dit_pilot.py", line 426, in _encode_batch
+    latent = codec.model.encode(batch)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/trainer/codec_trainer.py", line 815, in encode
+    latent, _encoded = self._state_detail_encode(batch)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/trainer/codec_trainer.py", line 795, in _state_detail_encode
+    encoded = self.frame_encoder(centered_batch)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/miniforge3/envs/torch-ito/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/miniforge3/envs/torch-ito/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/module/multiframe_codec.py", line 960, in forward
+    result = self._forward_external_spatial(nodes, graph)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/module/multiframe_codec.py", line 861, in _forward_external_spatial
+    return self.spatial_encoder(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/miniforge3/envs/torch-ito/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/miniforge3/envs/torch-ito/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/module/torchmd_et.py", line 376, in forward
+    dx, dvec = attn(xt, vec, edge_index, edge_weight_t, edge_attr_t, edge_vec_t, dim_size=z.shape[0])
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/miniforge3/envs/torch-ito/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/miniforge3/envs/torch-ito/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/module/torchmd_et.py", line 496, in forward
+    x, vec = self.propagate(
+             ^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/module/torchmd_et.py", line 534, in propagate
+    return self.aggregate((x, vec), edge_index[1], dim_size=dim_size)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/module/torchmd_et.py", line 584, in aggregate
+    vec = scatter(vec, index, dim=0, dim_size=dim_size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/molvid-dit-capacity-data-v1/utils/torchmd_utils.py", line 705, in scatter
+    res = out.scatter_reduce(dim, index, src, reduce_op)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
