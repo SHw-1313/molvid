@@ -16,22 +16,22 @@
 - Added draw-to-clip-to-system aggregation for H4/H8 and L4/L8/future metrics. Constant RMSF,
   ACF, and Pearson inputs now produce explicit null values instead of numeric sentinels.
 
-## Running on neibu
+## Training and evaluation status on neibu (2026-09-15)
 
-- tmux session `dit-capacity-train` on GPU0 runs independent Python processes in order: G48, C48, C48D8. Evaluation is not part of this queue.
+- The `dit-capacity-train` and `dit-capacity-eval` queues have exited cleanly; neibu GPU0 is idle.
 - Canonical training/numerical code commit: `c070e3c2aeecb6dc33d338e2429bfb426876faac`.
-- Evaluation/reporting code is committed separately through `36880c8` on the host and is intentionally not synced while the training queue can still launch later arms. The true future occupancy calculation is now an equivalent bounded-chunk vectorized implementation rather than one CUDA launch per atom pair.
+- Evaluation/reporting code is committed on the host through `9960a479071ddd50df575790a2fb6388fa399e93` and passed the targeted CUDA gate: 4 passed, 1 skipped, 17 deselected. The synced source used `DIT_CODE_COMMIT` set to that full commit.
 - Atomic checkpoints are written every 500 successful updates; resume truncates trailing JSONL rows to the checkpoint step before continuing.
-- G48 is complete and PASS at 4,500 updates and exactly 267,988,032 effective tokens. It has 9 RF validations, two complete 16-row real-generation monitors, and used 2.357 GPU-hours. C48 started fresh and its initial batch/H/tau sequence matches G48.
+- G48, C48, and C48D8 each completed PASS at 4,500 successful updates and exactly 267,988,032 effective atom-frame tokens. Their resumed summaries report 2.357, 4.941, and 4.998 GPU-hours; including G48's initial formal failed attempt, formal training attempts total about 13.161 GPU-hours.
+- All arms have 9 RF validation rows, complete 16-row real-generation monitors at steps 2,000 and 4,000, and 400 final-evaluation row files (144 final validation, 128 validation subset, 128 train subset). G48/C48 shared the exact initial 4-layer tensor hash and the first 16 batch/H/tau records; C48D8 has its distinct 8-layer initialization hash. Formal final checkpoints are in each arm's `checkpoints/checkpoint_final.pt`.
 - Run root: `/workspace/molvid-dit-capacity-data-v1/outputs/dit_capacity_data_v1/20260914_capacity_data_v1`.
 
-## Pending
+## Final status
 
-- Inspect training/evaluation outputs and failure status when the tmux queue exits.
-- After all three training processes exit, sync `36880c8`, run its CUDA metric/occupancy regressions and end-to-end timing, and then start final evaluation on an actually idle neibu GPU.
-- Sync compact evidence/checkpoints needed for handoff back to the B host worktree.
-- Finish `report.md`, learning curves, per-system results, and final `HANDOFF.md`.
-- Train C192 only if a local GPU becomes genuinely idle while the full expanded view remains available; do not copy the large payload to neibu.
+- C192 remains `BLOCKED_DATA`: neibu lacks 26,784 selected expanded clips, and the data must not be copied or the frozen selection/homology criteria weakened for this run.
+- Final generation evaluation ran on neibu GPU0 with actual sampler/decode/metrics, then resumable row shards were aggregated into `comparison.json`, `per_system_results.json`, `learning_curves.json`, `learning_curves.png`, `report.md`, and `summary.json`.
+- The completed outputs and compact prediction coordinates were synchronized back to the B host worktree; final hashes and checkpoint paths are recorded in `HANDOFF.md`.
+- Training plus real-generation evaluation is estimated at about 15.239 GPU-hours, excluding CPU-only preparation and targeted-test overhead, within the frozen 32 GPU-hour budget.
 
 The first 89-step G48 launch was intentionally stopped before any checkpoint while the recovery
 audit was tightened. Its files are preserved separately as
